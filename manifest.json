@@ -6,7 +6,8 @@
   "description": "Automates lead scraping and analysis on IndiaMART Seller Portal.",
   "permissions": [
     "tabs",
-    "scripting"
+    "scripting",
+    "activeTab"
   ],
   "host_permissions": [
     "https://seller.indiamart.com/*"

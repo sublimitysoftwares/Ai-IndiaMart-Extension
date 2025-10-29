@@ -16,12 +16,16 @@ import type { Lead } from './types';
   console.log('IndiaMART AI Agent: Content script initializing...');
 
   const LEAD_CARD_SELECTORS = [
+    'div.f1.lstNw',
+    'div.lstNw.lstNwDflx',
+    'div.lstNw.BUY_pr',
     'div.bl-itm',
     'div[class*="lead-card"]',
     'li[class*="lead-card"]',
     'div[data-card-type="lead"]',
     '[data-testid*="lead"]',
     '.lead-card',
+    '.blk-txn-card',
   ];
   const CONTACT_BUTTON_TEXT = 'Contact Buyer Now';
   const SEND_REPLY_TEXT = 'Send Reply';
@@ -41,8 +45,42 @@ import type { Lead } from './types';
   let filteredLeadsCount = 0;
   let contactedLeadsCount = 0;
   let pendingContacts: Lead[] = [];
+  let hasLoggedNoLeadCards = false;
 
   const sanitize = (value?: string | null): string => (value || '').trim();
+  const sanitizeOptional = (value?: string | null): string | undefined => {
+    const cleaned = sanitize(value);
+    return cleaned || undefined;
+  };
+
+  const getInputValue = (root: Document | Element | ShadowRoot, selector: string): string | undefined => {
+    const input = root.querySelector<HTMLInputElement>(selector);
+    return sanitizeOptional(input?.value);
+  };
+
+  const getTableValue = (root: Element, label: string): string | undefined => {
+    const normalized = label.trim().toLowerCase();
+    const rows = Array.from(root.querySelectorAll<HTMLTableRowElement>('tr'));
+    for (const row of rows) {
+      const cells = Array.from(row.querySelectorAll<HTMLTableCellElement>('td'));
+      if (!cells.length) continue;
+      const heading = sanitize(cells[0]?.textContent).replace(/[:：]/g, '').toLowerCase();
+      if (!heading) continue;
+      if (heading === normalized || heading.includes(normalized)) {
+        const valueCell = cells.slice(1).find((cell) => sanitize(cell.textContent)) || cells[1] || cells[0];
+        if (!valueCell) continue;
+        const rawValue =
+          valueCell.querySelector('b, strong')?.textContent ||
+          valueCell.textContent ||
+          '';
+        const cleaned = sanitize(rawValue.replace(/^[:：\s]+/, ''));
+        if (cleaned) {
+          return cleaned;
+        }
+      }
+    }
+    return undefined;
+  };
 
   const parseQuantity = (value?: string | null): { raw?: string; quantity?: number } => {
     if (!value) return {};
@@ -89,7 +127,7 @@ import type { Lead } from './types';
           console.log('[IndiaMART Agent] Added iframe context for scraping:', frame.id || frame.name || 'unnamed iframe');
         }
       } catch (error) {
-        console.warn('[IndiaMART Agent] Unable to access iframe for scraping:', error);
+        console.debug('[IndiaMART Agent] Unable to access iframe for scraping:', error);
       }
     });
 
@@ -127,7 +165,12 @@ import type { Lead } from './types';
     });
 
     if (cards.length === 0) {
-      console.warn('[IndiaMART Agent] No lead cards detected across any context. selectors:', LEAD_CARD_SELECTORS.join(', '));
+      if (!hasLoggedNoLeadCards) {
+        console.warn('[IndiaMART Agent] No lead cards detected across any context. selectors:', LEAD_CARD_SELECTORS.join(', '));
+        hasLoggedNoLeadCards = true;
+      }
+    } else {
+      hasLoggedNoLeadCards = false;
     }
 
     return cards;
@@ -136,19 +179,57 @@ import type { Lead } from './types';
   const buildLeadId = (card: Element, index: number, title: string, timestamp: string): string => {
     const attrId = card.getAttribute('data-lead-id');
     if (attrId) return attrId;
+
+    const hiddenId =
+      getInputValue(card, 'input[name="ofrid"], input[id^="ofrid"], input[name^="ofrid"]') ||
+      getInputValue(card, 'input[name="gridParam"], input[name^="gridParam"], input[id^="gridParam"]');
+    if (hiddenId) return hiddenId;
+
     return `${index}-${title || 'lead'}-${timestamp || 'time'}`.replace(/\s+/g, '-');
   };
 
   const extractLead = (card: Element, index: number): Lead => {
-    const companyName = sanitize(card.querySelector('p.bl-compNm, .company-name')?.textContent) || 'N/A';
-    const requirement = sanitize(card.querySelector('p.bl-enq-comp, .requirement')?.textContent) || 'No requirement specified.';
-    const location = sanitize(card.querySelector('li[title="Location"] span, .location')?.textContent) || 'N/A';
-    const timestamp = sanitize(card.querySelector('li[title="Date"] span, time, .date')?.textContent) || 'N/A';
-    const enquiryTitle = sanitize(card.querySelector('h1, h2, h3, .bl-title, .enquiry-title')?.textContent) || requirement;
+    const primaryTitle = sanitizeOptional(card.querySelector('h1, h2, h3, .bl-title, .enquiry-title')?.textContent);
+    const ofrTitle = getInputValue(card, 'input[name="ofrtitle"], input[id^="ofrtitle"], input[name^="ofrtitle"]');
 
-    const quantityInfo = parseQuantity(card.querySelector('.bl-qty, [class*="quantity"], li[title="Quantity"], li:has(span.bl-qty)')?.textContent || card.textContent?.match(/Quantity\s*[:\-]?\s*([\d.,]+)/i)?.[1]);
+    const companyName =
+      sanitizeOptional(card.querySelector('p.bl-compNm, .company-name')?.textContent) ||
+      sanitizeOptional(card.querySelector('.lstNwRgtBD .alignBox b, .lstNwRgtBD .buyer-name')?.textContent) ||
+      'N/A';
 
-    const categoryText = sanitize(card.querySelector('li[title="I am interested in"], .bl-interest, .bl-category a, .bl-category span')?.textContent);
+    const requirement =
+      sanitizeOptional(card.querySelector('p.bl-enq-comp, .requirement')?.textContent) ||
+      ofrTitle ||
+      primaryTitle ||
+      'No requirement specified.';
+
+    const city =
+      sanitizeOptional(card.querySelector('.lstNwLftLoc .city_click')?.textContent) ||
+      getInputValue(card, 'input[id^="card_city"], input[name^="card_city"]');
+    const state =
+      sanitizeOptional(card.querySelector('.lstNwLftLoc .state_click')?.textContent) ||
+      getInputValue(card, 'input[id^="card_state"], input[name^="card_state"]');
+    const location =
+      sanitizeOptional(card.querySelector('li[title="Location"] span, .location')?.textContent) ||
+      [city, state].filter(Boolean).join(', ') ||
+      'N/A';
+
+    const offerDate = getInputValue(card, 'input[name="offerdate"], input[id^="offerdate"], input[id^="ofrdate"], input[name^="ofrdate"]');
+    const timestamp =
+      offerDate ||
+      sanitizeOptional(card.querySelector('li[title="Date"] span, time, .date, .lstNwLftLoc strong')?.textContent) ||
+      'N/A';
+
+    const quantityText =
+      getTableValue(card as HTMLElement, 'Quantity') ||
+      sanitizeOptional(card.querySelector('.bl-qty, [class*="quantity"], li[title="Quantity"], li:has(span.bl-qty)')?.textContent);
+    const quantityMatch = card.textContent?.match(/Quantity\s*[:\-]?\s*([\d.,]+)/i);
+    const quantityInfo = parseQuantity(quantityText || quantityMatch?.[1]);
+
+    const categoryText =
+      sanitizeOptional(card.querySelector('li[title="I am interested in"], .bl-interest, .bl-category a, .bl-category span')?.textContent) ||
+      getInputValue(card, 'input[name="mcatname"], input[id^="mcatname"], input[name^="mcatname"]') ||
+      undefined;
 
     let fabricElement = card.querySelector('[class*="fabric"], li[title="Fabric"] span');
     if (!fabricElement) {
@@ -161,13 +242,14 @@ import type { Lead } from './types';
           (fabricLi as HTMLElement);
       }
     }
-    const fabricText = sanitize(fabricElement?.textContent);
+    const fabricText = getTableValue(card as HTMLElement, 'Fabric') || sanitizeOptional(fabricElement?.textContent);
 
     const orderValueNode = card.querySelector('li[title="Probable Order Value"], .bl-order-value, .probable-order');
-    const orderValueText = orderValueNode ? orderValueNode.textContent : card.textContent?.match(/Probable Order Value\s*[:\-]?\s*([^\n]+)/i)?.[1];
+    const orderValueText = getTableValue(card as HTMLElement, 'Probable Order Value') || orderValueNode?.textContent || card.textContent?.match(/Probable Order Value\s*[:\-]?\s*([^\n]+)/i)?.[1];
     const orderValueInfo = parseRupeeRange(orderValueText || undefined);
 
-    const leadId = buildLeadId(card, index, enquiryTitle, timestamp);
+    const enquiryTitle = primaryTitle || ofrTitle || requirement;
+    const leadId = buildLeadId(card, index, enquiryTitle || '', timestamp || '');
 
     return {
       leadId,
