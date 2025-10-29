@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["DOM", "DOM.Iterable", "ESNext"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "types": ["chrome", "vite/client", "node"],
+
+    /* Bundler mode */
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+
+    /* Linting */
+    "strict": true
+  },
+  "include": [
+    "index.tsx",
+    "App.tsx",
+    "types.ts",
+    "services/geminiService.ts",
+    "components/LeadCard.tsx",
+    "background.ts",
+    "content.ts",
+    "vite.config.ts"
+  ]
+}

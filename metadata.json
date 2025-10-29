@@ -1,0 +1,5 @@
+{
+  "name": "IndiaMART AI Agent",
+  "description": "An AI-powered Chrome extension to automate lead scraping and analysis on the IndiaMART Seller Portal. It opens the relevant leads page, scrapes the available leads, and uses the Gemini API to rank them based on their potential.",
+  "requestFramePermissions": []
+}
