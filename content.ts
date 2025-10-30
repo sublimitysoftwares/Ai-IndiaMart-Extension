@@ -29,6 +29,7 @@ import type { Lead } from './types';
   ];
   const CONTACT_BUTTON_TEXT = 'Contact Buyer Now';
   const SEND_REPLY_TEXT = 'Send Reply';
+  const SEND_REPLY_SELECTOR = '.btn-latest';
   const SCRAPE_INTERVAL_MS = 1000;
   const SCRAPE_MAX_ATTEMPTS = 15;
   const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
@@ -312,7 +313,13 @@ import type { Lead } from './types';
     }
     contactButton.click();
 
-    const replyButton = await waitForElement(() => findElementByText(document, 'button, a', SEND_REPLY_TEXT), 8000);
+    const replyButton = await waitForElement(() => {
+      const directMatch = document.querySelector<HTMLElement>(SEND_REPLY_SELECTOR);
+      if (directMatch && directMatch.textContent?.trim().toLowerCase() === SEND_REPLY_TEXT.toLowerCase()) {
+        return directMatch;
+      }
+      return findElementByText(document, 'button, a, div', SEND_REPLY_TEXT);
+    }, 8000);
     if (!replyButton) {
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
