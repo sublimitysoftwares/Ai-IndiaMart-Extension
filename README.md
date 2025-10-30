@@ -1,9 +1,8 @@
-# IndiaMART AI Agent (Local Filtering)
+# IndiaMART Agent (Local Filtering)
 
 Chrome extension that automates scraping and locally filtering IndiaMART leads, with an optional auto-contact workflow. The Gemini integration has been removed; everything runs on deterministic heuristics inside the extension.
 
 ---
-
 ## Features
 
 ### Lead scraping & filtering
@@ -17,7 +16,7 @@ Chrome extension that automates scraping and locally filtering IndiaMART leads, 
 - Stops refreshing and contacting immediately when you toggle Auto Contact off or hit the **Stop Agent** button.
 
 ### Agent controls
-- **Start AI Agent** — opens the Seller Portal, injects the content script, and begins scraping/filtering.
+- **Start Agent** — opens the Seller Portal, injects the content script, and begins scraping/filtering.
 - **Auto Contact toggle** — automates contacting for qualified leads, with safety checks and stop support.
 - **Stop Agent** — visible at all times; cancels auto-contact, clears queued work, and prevents further refreshes.
 
@@ -52,7 +51,7 @@ Chrome extension that automates scraping and locally filtering IndiaMART leads, 
 ### Usage workflow
 
 1. Click the extension icon to open the popup.
-2. Press **Start AI Agent** — the extension opens the IndiaMART Seller Portal and begins scraping.
+2. Press **Start Agent** — the extension opens the IndiaMART Seller Portal and begins scraping.
 3. Leads are filtered locally. Qualified leads show up in the popup with their details and filter reasons.
 4. (Optional) Toggle **Auto Contact** to let the agent handle follow-ups automatically. You can stop it anytime via **Stop Agent**.
 5. When you’re done, simply close the popup or use **Stop Agent** to halt refreshing and messaging.

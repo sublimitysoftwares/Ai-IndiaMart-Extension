@@ -3,17 +3,17 @@ import type { Lead } from './types';
 
 // Wrap everything in an IIFE to prevent redeclaration errors
 (() => {
-  const GLOBAL_FLAG = '__INDIAMART_AI_AGENT_CONTENT__';
+  const GLOBAL_FLAG = '__INDIAMART_AGENT_CONTENT__';
   
   // Check if already loaded
   if ((window as any)[GLOBAL_FLAG]) {
-    console.log('IndiaMART AI Agent: Content script already loaded, skipping...');
+    console.log('IndiaMART Agent: Content script already loaded, skipping...');
     return;
   }
   
   // Mark as loaded
   (window as any)[GLOBAL_FLAG] = true;
-  console.log('IndiaMART AI Agent: Content script initializing...');
+  console.log('IndiaMART Agent: Content script initializing...');
 
   const LEAD_CARD_SELECTORS = [
     'div.f1.lstNw',
@@ -49,6 +49,29 @@ import type { Lead } from './types';
   let contactedLeadsCount = 0;
   let pendingContacts: Lead[] = [];
   let hasLoggedNoLeadCards = false;
+
+  const syncAutoContactState = () => {
+    if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+      return;
+    }
+
+    chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('Sync auto-contact state failed:', chrome.runtime.lastError.message);
+        return;
+      }
+
+      if (response && response.success) {
+        const previousState = isAutoContactEnabled;
+        isAutoContactEnabled = Boolean(response.autoContactEnabled);
+        isStopped = Boolean(response.agentStopped);
+
+        if (!previousState && isAutoContactEnabled && !isStopped) {
+          console.log('Auto-contact restored from background state.');
+        }
+      }
+    });
+  };
 
   const sanitize = (value?: string | null): string => (value || '').trim();
   const sanitizeOptional = (value?: string | null): string | undefined => {
@@ -413,7 +436,7 @@ import type { Lead } from './types';
     
     pageRefreshTimer = setTimeout(() => {
       if (!isStopped && isAutoContactEnabled) {
-        console.log('IndiaMART AI Agent: Refreshing page...');
+        console.log('IndiaMART Agent: Refreshing page...');
         window.location.reload();
       }
     }, refreshDelay);
@@ -632,5 +655,6 @@ import type { Lead } from './types';
     }, SCRAPE_INTERVAL_MS);
   };
   
+  syncAutoContactState();
   startScrapeLoop();
 })(); // End of IIFE

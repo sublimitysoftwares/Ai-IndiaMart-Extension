@@ -279,7 +279,7 @@ const App: React.FC = () => {
                  
                  {agentStopped && (
                    <div className="mt-2 p-2 bg-red-900/20 rounded text-xs text-red-400 text-center">
-                     Agent Stopped - Click "Start AI Agent" to resume
+                     Agent Stopped - Click "Start Agent" to resume
                    </div>
                  )}
                </div>
@@ -342,7 +342,7 @@ const App: React.FC = () => {
               onClick={handleStartAgent}
               className="w-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg text-lg transform transition-transform duration-150 hover:scale-105"
             >
-              Start AI Agent
+              Start Agent
             </button>
             <button
               onClick={handleStopAgent}
@@ -361,7 +361,7 @@ const App: React.FC = () => {
       <header className="p-4 bg-slate-800 border-b border-slate-700">
         <div className="flex items-center justify-between gap-3">
           <h1 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-pink-500">
-            IndiaMART AI Agent
+            IndiaMART Agent
           </h1>
           <button
             onClick={handleStopAgent}

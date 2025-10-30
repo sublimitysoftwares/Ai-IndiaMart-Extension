@@ -1,7 +1,7 @@
 
 {
   "manifest_version": 3,
-  "name": "IndiaMART AI Agent",
+  "name": "IndiaMART Agent",
   "version": "1.0",
   "description": "Automates lead scraping and analysis on IndiaMART Seller Portal.",
   "permissions": [
