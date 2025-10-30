@@ -19,8 +19,6 @@ export interface Lead {
   nextContactDelayMinutes?: number;
   autoContacted?: boolean;
   contactedAt?: string;
-  potentialScore?: number;
-  analysis?: string;
 }
 
 export interface QualifiedLead extends Lead {

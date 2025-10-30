@@ -21,7 +21,6 @@
     "index.tsx",
     "App.tsx",
     "types.ts",
-    "services/geminiService.ts",
     "components/LeadCard.tsx",
     "background.ts",
     "content.ts",

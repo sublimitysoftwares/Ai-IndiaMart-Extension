@@ -6,16 +6,7 @@ interface LeadCardProps {
   lead: Lead;
 }
 
-const getScoreColor = (score?: number) => {
-    if (score === undefined) return 'bg-slate-600';
-    if (score >= 80) return 'bg-green-500';
-    if (score >= 60) return 'bg-yellow-500';
-    if (score >= 40) return 'bg-orange-500';
-    return 'bg-red-500';
-}
-
 export const LeadCard: React.FC<LeadCardProps> = ({ lead }) => {
-  const scoreColor = getScoreColor(lead.potentialScore);
   
   return (
     <div className={`rounded-lg shadow-md overflow-hidden border transition-all duration-300 hover:shadow-indigo-500/20 ${
@@ -41,11 +32,6 @@ export const LeadCard: React.FC<LeadCardProps> = ({ lead }) => {
               <span className="text-xs bg-blue-600 text-white px-2 py-1 rounded">
                 ✓ Filtered
               </span>
-            )}
-            {lead.potentialScore !== undefined && (
-              <div className={`flex items-center space-x-2 text-white px-3 py-1 rounded-full text-sm font-bold ${scoreColor}`}>
-                <span>{lead.potentialScore}%</span>
-              </div>
             )}
           </div>
         </div>
@@ -85,9 +71,6 @@ export const LeadCard: React.FC<LeadCardProps> = ({ lead }) => {
         <div className="space-y-1 text-xs text-slate-400">
           <div>📍 {lead.location}</div>
           <div>📅 {lead.timestamp}</div>
-          {lead.analysis && (
-            <div className="mt-2 text-slate-300 italic">"{lead.analysis}"</div>
-          )}
           {lead.contactedAt && (
             <div className="mt-1 text-green-400">Contacted at: {new Date(lead.contactedAt).toLocaleTimeString()}</div>
           )}

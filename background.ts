@@ -14,6 +14,25 @@ let autoContactState = {
   }
 };
 
+const sendMessageSafe = (message: unknown) => {
+  if (!chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
+    return;
+  }
+
+  try {
+    chrome.runtime.sendMessage(message, () => {
+      const error = chrome.runtime.lastError;
+      if (error && !error.message?.includes('Receiving end does not exist')) {
+        console.warn('[Background] sendMessage error:', error.message);
+      }
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      console.warn('[Background] sendMessage threw:', error.message);
+    }
+  }
+};
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_AGENT') {
     const targetUrl = 'https://seller.indiamart.com/bltxn/?pref=relevant';
@@ -84,7 +103,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     autoContactState.statistics.totalFiltered = message.totalFiltered || autoContactState.statistics.totalFiltered;
     
     // Notify popup if open
-    chrome.runtime.sendMessage({
+    sendMessageSafe({
       type: 'AUTO_CONTACT_UPDATE',
       leadId: message.leadId,
       companyName: message.companyName,
@@ -113,7 +132,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       autoContactState.statistics.totalFiltered = message.payload.filteredLeads.length;
     }
     // Forward to popup
-    chrome.runtime.sendMessage(message);
+    sendMessageSafe(message);
     return true;
   } else if (message.type === 'RESET_STATISTICS') {
     autoContactState.processedLeads.clear();
@@ -140,7 +159,7 @@ function injectScript(tabId: number) {
       if (chrome.runtime.lastError) {
         console.error('Script injection failed: ', chrome.runtime.lastError.message);
         // Send an error message back to the popup
-        chrome.runtime.sendMessage({ type: 'SCRAPING_ERROR', error: `Failed to inject script: ${chrome.runtime.lastError.message}` });
+        sendMessageSafe({ type: 'SCRAPING_ERROR', error: `Failed to inject script: ${chrome.runtime.lastError.message}` });
       } else {
         console.log('Content script injected successfully');
         

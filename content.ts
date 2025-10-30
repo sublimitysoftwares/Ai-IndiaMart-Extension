@@ -321,15 +321,15 @@ import type { Lead } from './types';
 
   // Removed duplicate startScrapeLoop - defined later in the file
 
-  const applyIntelligentFilter = (lead: Lead): { passed: boolean; reason: string } => {
-    // Filter 1: Header/Enquiry Title Keywords
-    const keywords = [
+  const applyIntelligentFilter = (lead: Lead): { passed: boolean; reason: string; nextContactDelayMinutes: number } => {
+    // Filter 1: Enquiry Title Keywords (inclusive match)
+    const enquiryKeywords = [
       'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'nurse uniform',
       'chef coats', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform'
     ];
     const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
-    const hasKeyword = keywords.some(keyword => titleLower.includes(keyword));
-    if (!hasKeyword) return { passed: false, reason: 'No uniform keywords found' };
+    const hasKeyword = enquiryKeywords.some(keyword => titleLower.includes(keyword));
+    if (!hasKeyword) return { passed: false, reason: 'No uniform keywords found', nextContactDelayMinutes: 0 };
     
     // Filter 2: Location exclusion
     const excludedLocations = [
@@ -337,37 +337,41 @@ import type { Lead } from './types';
     ];
     const locationLower = (lead.location || '').toLowerCase();
     const isExcluded = excludedLocations.some(loc => locationLower.includes(loc));
-    if (isExcluded) return { passed: false, reason: 'Location is excluded' };
+    if (isExcluded) return { passed: false, reason: 'Location is excluded', nextContactDelayMinutes: 0 };
     
     // Check for foreign locations
     const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
     const isForeign = foreignIndicators.some(country => locationLower.includes(country));
-    if (isForeign) return { passed: false, reason: 'Foreign location' };
+    if (isForeign) return { passed: false, reason: 'Foreign location', nextContactDelayMinutes: 0 };
     
     // Filter 3: Quantity > 100
     if (!lead.quantity || lead.quantity <= 100) {
-      return { passed: false, reason: 'Quantity <= 100' };
+      return { passed: false, reason: 'Quantity <= 100', nextContactDelayMinutes: 0 };
     }
     
-    // Filter 4: Category match
+    // Filter 4: Category match (exact match)
     const allowedCategories = [
       'kids school uniform', 'school uniforms', 'school blazers', 'school uniform fabric',
       'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
       'safety suits', 'boys school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform'
     ];
     const categoryLower = (lead.category || '').toLowerCase();
-    const hasCategory = allowedCategories.some(cat => categoryLower === cat || categoryLower.includes(cat));
+    const hasCategory = allowedCategories.some(cat => categoryLower === cat);
     if (!hasCategory && lead.category) {
-      return { passed: false, reason: 'Category not in allowed list' };
+      return { passed: false, reason: 'Category not in allowed list', nextContactDelayMinutes: 0 };
     }
     
     // Filter 5: Probable Order Value > ₹50,000
     const orderValue = lead.probableOrderValueMin || lead.probableOrderValueMax || 0;
     if (orderValue <= 50000) {
-      return { passed: false, reason: 'Order value <= ₹50,000' };
+      return { passed: false, reason: 'Order value <= ₹50,000', nextContactDelayMinutes: 0 };
     }
     
-    return { passed: true, reason: 'Meets all criteria' };
+    // Generate random delay between 1-10 minutes for qualified leads
+    const delayOptions = [1, 5, 10];
+    const randomDelay = delayOptions[Math.floor(Math.random() * delayOptions.length)];
+    
+    return { passed: true, reason: 'Meets all criteria', nextContactDelayMinutes: randomDelay };
   };
 
   const getRandomDelay = (): number => {
@@ -452,6 +456,7 @@ import type { Lead } from './types';
       const filterResult = applyIntelligentFilter(lead);
       lead.passedFilter = filterResult.passed;
       lead.filterReason = filterResult.reason;
+      lead.nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
       
       console.log(`[IndiaMART Agent] Lead: ${lead.companyName}`);
       console.log(`  - Filter passed: ${filterResult.passed}`);
@@ -493,9 +498,9 @@ import type { Lead } from './types';
     
     // Decide on refresh strategy
     if (filteredLeadsCount === 0) {
-      // No filtered leads, refresh after 5 minutes
-      console.log('No filtered leads found. Will refresh in 5 minutes...');
-      setupPageRefresh();
+      // No filtered leads, refresh immediately
+      console.log('No filtered leads found. Refreshing page immediately...');
+      setupPageRefresh(true);
     } else if (isAutoContactEnabled && !isStopped) {
       // Process contacts with proper timing
       for (let i = 0; i < pendingContacts.length; i++) {

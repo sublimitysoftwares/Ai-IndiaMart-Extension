@@ -3,15 +3,12 @@
 
 import React, { useState, useEffect } from 'react';
 import type { Lead } from './types';
-import { analyzeLeadsWithGemini } from './services/geminiService';
 import { LeadCard } from './components/LeadCard';
 
 enum AppState {
   Idle,
   Loading,
   LeadsScraped,
-  Analyzing,
-  AnalysisComplete,
   Error,
   AutoContact,
 }
@@ -27,7 +24,7 @@ const App: React.FC = () => {
   const [leads, setLeads] = useState<Lead[]>([]);
   const [filteredLeads, setFilteredLeads] = useState<Lead[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<'score' | 'time' | 'company'>('score');
+  const [sortBy, setSortBy] = useState<'time' | 'company'>('time');
   const [autoContactEnabled, setAutoContactEnabled] = useState(false);
   const [agentStopped, setAgentStopped] = useState(false);
   const [autoContactStats, setAutoContactStats] = useState<AutoContactStats>({
@@ -41,8 +38,6 @@ const App: React.FC = () => {
     const arr = [...leads];
     if (arr.length === 0) return arr;
     switch (sortBy) {
-      case 'score':
-        return arr.sort((a, b) => (b.potentialScore || 0) - (a.potentialScore || 0));
       case 'time': {
         const toTime = (t?: string) => {
           if (!t) return 0;
@@ -148,21 +143,6 @@ const App: React.FC = () => {
     }
   };
 
-  const handleAnalyzeLeads = async () => {
-    setAppState(AppState.Analyzing);
-    setError(null);
-    try {
-      const analyzedLeads = await analyzeLeadsWithGemini(leads);
-      setLeads(analyzedLeads);
-      setAppState(AppState.AnalysisComplete);
-    } catch (e) {
-      console.error('Gemini API Error:', e);
-      const errorMessage = e instanceof Error ? e.message : 'An unknown error occurred during analysis.';
-      setError(`Failed to analyze leads: ${errorMessage}. Ensure your API key is configured correctly.`);
-      setAppState(AppState.Error);
-    }
-  };
-
   const renderContent = () => {
     switch (appState) {
       case AppState.Loading:
@@ -177,8 +157,6 @@ const App: React.FC = () => {
           </div>
         );
       case AppState.LeadsScraped:
-      case AppState.Analyzing:
-      case AppState.AnalysisComplete:
       case AppState.AutoContact:
         return (
           <div>
@@ -259,28 +237,13 @@ const App: React.FC = () => {
                  </div>
                )}
                
-               {appState !== AppState.Analyzing && !autoContactEnabled && (
-                <button
-                    onClick={handleAnalyzeLeads}
-                    className="w-full mt-3 bg-gradient-to-r from-green-400 to-blue-500 hover:from-green-500 hover:to-blue-600 text-white font-bold py-2 px-4 rounded-lg shadow-lg transform transition-transform duration-150 hover:scale-105"
-                >
-                    Analyze with AI
-                </button>
-               )}
-               {appState === AppState.Analyzing && (
-                 <div className="flex items-center justify-center text-sm text-slate-300 mt-3">
-                    <svg className="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                    AI is ranking leads...
-                 </div>
-               )}
                <div className="mt-3">
                  <label className="block text-sm text-slate-300 mb-1">Sort by</label>
                  <select
                    value={sortBy}
-                   onChange={(e) => setSortBy(e.target.value as 'score' | 'time' | 'company')}
+                   onChange={(e) => setSortBy(e.target.value as 'time' | 'company')}
                    className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                  >
-                   <option value="score">Score (high to low)</option>
                    <option value="time">Time (newest first)</option>
                    <option value="company">Company (A–Z)</option>
                  </select>
