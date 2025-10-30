@@ -25,7 +25,7 @@ const App: React.FC = () => {
   const [filteredLeads, setFilteredLeads] = useState<Lead[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<'time' | 'company'>('time');
-  const [autoContactEnabled, setAutoContactEnabled] = useState(false);
+  const [autoContactEnabled, setAutoContactEnabled] = useState(true);
   const [agentStopped, setAgentStopped] = useState(false);
   const [autoContactStats, setAutoContactStats] = useState<AutoContactStats>({
     totalContacted: 0,
@@ -33,6 +33,7 @@ const App: React.FC = () => {
     sessionStartTime: Date.now()
   });
   const [showFilterDetails, setShowFilterDetails] = useState(false);
+  const [agentInitialized, setAgentInitialized] = useState(false);
 
   const sortedLeads = React.useMemo(() => {
     const arr = [...leads];
@@ -56,11 +57,37 @@ const App: React.FC = () => {
   useEffect(() => {
     // Ensure this code runs only within a Chrome extension context
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (response) => {
+        if (!response || response.success === false) {
+          return;
+        }
+
+        if (response.agentActive && response.leadsPayload) {
+          setLeads(response.leadsPayload.allLeads || []);
+          setFilteredLeads(response.leadsPayload.filteredLeads || []);
+          setAutoContactEnabled(Boolean(response.autoContactEnabled));
+          setAutoContactStats((prev) => ({
+            ...prev,
+            totalFiltered: response.leadsPayload.filteredLeads?.length || prev.totalFiltered,
+            totalContacted: response.statistics?.totalContacted || prev.totalContacted,
+          }));
+          setAgentStopped(Boolean(response.agentStopped));
+          setAgentInitialized(true);
+          setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+        } else {
+          setAgentInitialized(false);
+          setAutoContactEnabled(response?.autoContactEnabled ?? true);
+          setAppState(AppState.Idle);
+        }
+      });
+
       const messageListener = (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {
         if (message.type === 'LEADS_DATA') {
           if (message.payload && message.payload.length > 0) {
             setLeads(message.payload);
             setAppState(AppState.LeadsScraped);
+            setAgentInitialized(true);
+            setAgentStopped(false);
           } else {
             setError("No leads found on the page. Please ensure you are on the 'Buy Leads' page and leads are visible.");
             setAppState(AppState.Error);
@@ -70,6 +97,12 @@ const App: React.FC = () => {
             setLeads(message.payload.allLeads || []);
             setFilteredLeads(message.payload.filteredLeads || []);
             setAppState(autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+            setAgentInitialized(true);
+            setAgentStopped(false);
+            setAutoContactStats(prev => ({
+              ...prev,
+              totalFiltered: message.payload.filteredLeads?.length ?? prev.totalFiltered
+            }));
           }
         } else if (message.type === 'AUTO_CONTACT_UPDATE') {
           // Update stats when a lead is contacted
@@ -80,6 +113,15 @@ const App: React.FC = () => {
         } else if (message.type === 'SCRAPING_ERROR') {
             setError(message.error);
             setAppState(AppState.Error);
+            setAgentInitialized(false);
+        } else if (message.type === 'AGENT_READY') {
+            setAgentInitialized(true);
+            setAgentStopped(false);
+        } else if (message.type === 'STOP_AGENT') {
+            setAgentInitialized(false);
+            setAgentStopped(true);
+            setAutoContactEnabled(false);
+            setAppState(AppState.Idle);
         }
       };
 
@@ -101,11 +143,32 @@ const App: React.FC = () => {
   const handleStartAgent = () => {
      // Ensure this code runs only within a Chrome extension context
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-        setAppState(AppState.Loading);
         setError(null);
-        setLeads([]);
-        setFilteredLeads([]);
-        chrome.runtime.sendMessage({ type: 'START_AGENT' });
+        if (!agentInitialized) {
+          setAppState(AppState.Loading);
+        }
+        chrome.runtime.sendMessage({ type: 'START_AGENT' }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('START_AGENT error:', chrome.runtime.lastError.message);
+            setError('Failed to start agent. Please try again.');
+            setAppState(AppState.Error);
+            return;
+          }
+
+          if (response && response.success) {
+            setAgentStopped(false);
+            if (response.leadsPayload) {
+              setLeads(response.leadsPayload.allLeads || []);
+              setFilteredLeads(response.leadsPayload.filteredLeads || []);
+              setAutoContactEnabled(Boolean(response.autoContactEnabled));
+              setAgentInitialized(true);
+              setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+            } else if (!agentInitialized) {
+              // Wait for content script to report back
+              setAppState(AppState.Loading);
+            }
+          }
+        });
     } else {
         setError("Cannot communicate with the extension background script. Are you running this as an extension?");
         setAppState(AppState.Error);
