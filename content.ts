@@ -34,6 +34,8 @@ import type { Lead } from './types';
   const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
   const MIN_CONTACT_DELAY = 10 * 1000; // 10 seconds
   const MAX_CONTACT_DELAY = 5 * 60 * 1000; // 5 minutes
+  const CONTACT_REPLY_DELAY_MIN = 4 * 60 * 1000; // 4 minutes
+  const CONTACT_REPLY_DELAY_MAX = 6 * 60 * 1000; // 6 minutes
   const MAX_CONTACT_GAP = 15 * 60 * 1000; // 15 minutes
   
   // State management
@@ -314,6 +316,18 @@ import type { Lead } from './types';
     if (!replyButton) {
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
+
+    const replyDelay =
+      CONTACT_REPLY_DELAY_MIN + Math.random() * (CONTACT_REPLY_DELAY_MAX - CONTACT_REPLY_DELAY_MIN);
+    console.log(
+      `[IndiaMART Agent] Waiting ${(replyDelay / 60000).toFixed(2)} minutes before sending reply...`
+    );
+    await new Promise((resolve) => setTimeout(resolve, replyDelay));
+
+    if (isStopped || !isAutoContactEnabled) {
+      return { success: false, error: 'Agent stopped or auto-contact disabled before sending reply.' };
+    }
+
     replyButton.click();
 
     return { success: true };
