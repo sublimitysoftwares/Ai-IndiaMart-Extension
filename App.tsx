@@ -138,7 +138,9 @@ const App: React.FC = () => {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       setAgentStopped(true);
       setAutoContactEnabled(false);
-      setAppState(AppState.LeadsScraped);
+      setLeads([]);
+      setFilteredLeads([]);
+      setAppState(AppState.Idle);
       chrome.runtime.sendMessage({ type: 'STOP_AGENT' });
     }
   };
@@ -272,14 +274,20 @@ const App: React.FC = () => {
       case AppState.Idle:
       default:
         return (
-          <div className="p-6 flex flex-col items-center">
+          <div className="p-6 flex flex-col items-center space-y-3">
             <button
               onClick={handleStartAgent}
               className="w-full bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500 text-white font-bold py-3 px-6 rounded-lg shadow-lg text-lg transform transition-transform duration-150 hover:scale-105"
             >
               Start AI Agent
             </button>
-            <p className="text-sm text-slate-400 mt-4 text-center">Click to open IndiaMART and automatically scrape the latest leads for analysis.</p>
+            <button
+              onClick={handleStopAgent}
+              className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold py-3 px-6 rounded-lg shadow text-sm transition-transform duration-150 hover:scale-105"
+            >
+              Stop Agent
+            </button>
+            <p className="text-sm text-slate-400 text-center">Click to open IndiaMART and automatically scrape the latest leads for analysis.</p>
           </div>
         );
     }
@@ -288,9 +296,17 @@ const App: React.FC = () => {
   return (
     <div className="w-[450px] max-h-[600px] overflow-y-auto text-white bg-slate-900 font-sans">
       <header className="p-4 bg-slate-800 border-b border-slate-700">
-        <h1 className="text-xl font-bold text-center text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-pink-500">
-          IndiaMART AI Agent
-        </h1>
+        <div className="flex items-center justify-between gap-3">
+          <h1 className="text-xl font-bold text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 to-pink-500">
+            IndiaMART AI Agent
+          </h1>
+          <button
+            onClick={handleStopAgent}
+            className="px-3 py-1 text-xs bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors"
+          >
+            Stop Agent
+          </button>
+        </div>
       </header>
       <main>
         {renderContent()}

@@ -379,17 +379,19 @@ import type { Lead } from './types';
   };
 
   const setupPageRefresh = (immediate = false) => {
+    if (isStopped || !isAutoContactEnabled) {
+      return;
+    }
+
     if (pageRefreshTimer) {
       clearTimeout(pageRefreshTimer);
       pageRefreshTimer = null;
     }
     
-    if (isStopped) return;
-    
     const refreshDelay = immediate ? 0 : REFRESH_INTERVAL;
     
     pageRefreshTimer = setTimeout(() => {
-      if (!isStopped) {
+      if (!isStopped && isAutoContactEnabled) {
         console.log('IndiaMART AI Agent: Refreshing page...');
         window.location.reload();
       }
@@ -418,7 +420,7 @@ import type { Lead } from './types';
         console.log(`Contacted: ${lead.companyName} (${contactedLeadsCount}/${filteredLeadsCount})`);
         
         // Check if all filtered leads have been contacted
-        if (contactedLeadsCount >= filteredLeadsCount) {
+        if (contactedLeadsCount >= filteredLeadsCount && isAutoContactEnabled && !isStopped) {
           console.log('All filtered leads contacted. Refreshing page...');
           setupPageRefresh(true); // Immediate refresh
         }
@@ -498,9 +500,12 @@ import type { Lead } from './types';
     
     // Decide on refresh strategy
     if (filteredLeadsCount === 0) {
-      // No filtered leads, refresh immediately
-      console.log('No filtered leads found. Refreshing page immediately...');
-      setupPageRefresh(true);
+      if (isAutoContactEnabled && !isStopped) {
+        console.log('No filtered leads found. Refreshing page immediately...');
+        setupPageRefresh(true);
+      } else {
+        console.log('No filtered leads found. Auto-contact disabled, no refresh scheduled.');
+      }
     } else if (isAutoContactEnabled && !isStopped) {
       // Process contacts with proper timing
       for (let i = 0; i < pendingContacts.length; i++) {
