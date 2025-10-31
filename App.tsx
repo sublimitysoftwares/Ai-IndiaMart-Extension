@@ -34,6 +34,7 @@ const App: React.FC = () => {
   });
   const [showFilterDetails, setShowFilterDetails] = useState(false);
   const [agentInitialized, setAgentInitialized] = useState(false);
+  const agentStoppedRef = React.useRef(false);
 
   const sortedLeads = React.useMemo(() => {
     const arr = [...leads];
@@ -62,6 +63,17 @@ const App: React.FC = () => {
           return;
         }
 
+        if (response.agentStopped) {
+          setAgentStopped(true);
+          agentStoppedRef.current = true;
+          setAgentInitialized(false);
+          setLeads([]);
+          setFilteredLeads([]);
+          setAutoContactEnabled(Boolean(response.autoContactEnabled));
+          setAppState(AppState.Idle);
+          return;
+        }
+
         if (response.agentActive && response.leadsPayload) {
           setLeads(response.leadsPayload.allLeads || []);
           setFilteredLeads(response.leadsPayload.filteredLeads || []);
@@ -72,6 +84,7 @@ const App: React.FC = () => {
             totalContacted: response.statistics?.totalContacted || prev.totalContacted,
           }));
           setAgentStopped(Boolean(response.agentStopped));
+          agentStoppedRef.current = Boolean(response.agentStopped);
           setAgentInitialized(true);
           setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
         } else {
@@ -83,33 +96,44 @@ const App: React.FC = () => {
 
       const messageListener = (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {
         if (message.type === 'LEADS_DATA') {
+          if (agentStoppedRef.current) {
+            return;
+          }
           if (message.payload && message.payload.length > 0) {
             setLeads(message.payload);
             setAppState(AppState.LeadsScraped);
             setAgentInitialized(true);
             setAgentStopped(false);
+            agentStoppedRef.current = false;
           } else {
             setError("No leads found on the page. Please ensure you are on the 'Buy Leads' page and leads are visible.");
             setAppState(AppState.Error);
+            setAgentInitialized(false);
           }
         } else if (message.type === 'FILTERED_LEADS_DATA') {
+          if (agentStoppedRef.current) {
+            return;
+          }
           if (message.payload) {
             setLeads(message.payload.allLeads || []);
             setFilteredLeads(message.payload.filteredLeads || []);
             setAppState(autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
             setAgentInitialized(true);
             setAgentStopped(false);
+            agentStoppedRef.current = false;
             setAutoContactStats(prev => ({
               ...prev,
               totalFiltered: message.payload.filteredLeads?.length ?? prev.totalFiltered
             }));
           }
         } else if (message.type === 'AUTO_CONTACT_UPDATE') {
-          // Update stats when a lead is contacted
-          setAutoContactStats(prev => ({
-            ...prev,
-            totalContacted: message.statistics?.totalContacted || prev.totalContacted + 1
-          }));
+          if (!agentStoppedRef.current) {
+            // Update stats when a lead is contacted
+            setAutoContactStats(prev => ({
+              ...prev,
+              totalContacted: message.statistics?.totalContacted || prev.totalContacted + 1
+            }));
+          }
         } else if (message.type === 'SCRAPING_ERROR') {
             setError(message.error);
             setAppState(AppState.Error);
@@ -117,11 +141,15 @@ const App: React.FC = () => {
         } else if (message.type === 'AGENT_READY') {
             setAgentInitialized(true);
             setAgentStopped(false);
+            agentStoppedRef.current = false;
         } else if (message.type === 'STOP_AGENT') {
             setAgentInitialized(false);
             setAgentStopped(true);
             setAutoContactEnabled(false);
             setAppState(AppState.Idle);
+            setLeads([]);
+            setFilteredLeads([]);
+            agentStoppedRef.current = true;
         }
       };
 
@@ -157,6 +185,7 @@ const App: React.FC = () => {
 
           if (response && response.success) {
             setAgentStopped(false);
+            agentStoppedRef.current = false;
             if (response.leadsPayload) {
               setLeads(response.leadsPayload.allLeads || []);
               setFilteredLeads(response.leadsPayload.filteredLeads || []);
@@ -180,6 +209,7 @@ const App: React.FC = () => {
       const newState = !autoContactEnabled;
       setAutoContactEnabled(newState);
       setAgentStopped(false);
+      agentStoppedRef.current = false;
       
       if (newState) {
         setAppState(AppState.AutoContact);
@@ -200,6 +230,7 @@ const App: React.FC = () => {
   const handleStopAgent = () => {
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
       setAgentStopped(true);
+      agentStoppedRef.current = true;
       setAutoContactEnabled(false);
       setLeads([]);
       setFilteredLeads([]);
@@ -207,6 +238,10 @@ const App: React.FC = () => {
       chrome.runtime.sendMessage({ type: 'STOP_AGENT' });
     }
   };
+
+  useEffect(() => {
+    agentStoppedRef.current = agentStopped;
+  }, [agentStopped]);
 
   const renderContent = () => {
     switch (appState) {
