@@ -32,7 +32,7 @@ import type { Lead } from './types';
   const SEND_REPLY_SELECTOR = '.btn-latest';
   const SCRAPE_INTERVAL_MS = 1000;
   const SCRAPE_MAX_ATTEMPTS = 15;
-  const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes
+  const REFRESH_INTERVAL = 30 * 1000; // 30 seconds
   const MIN_CONTACT_DELAY = 10 * 1000; // 10 seconds
   const MAX_CONTACT_DELAY = 5 * 60 * 1000; // 5 minutes
   const CONTACT_REPLY_DELAY_MIN = 4 * 60 * 1000; // 4 minutes
@@ -49,6 +49,7 @@ import type { Lead } from './types';
   let contactedLeadsCount = 0;
   let pendingContacts: Lead[] = [];
   let hasLoggedNoLeadCards = false;
+  let lastRefreshTime = 0;
 
   const syncAutoContactState = () => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
@@ -67,7 +68,11 @@ import type { Lead } from './types';
         isStopped = Boolean(response.agentStopped);
 
         if (!previousState && isAutoContactEnabled && !isStopped) {
-          console.log('Auto-contact restored from background state.');
+          console.log('Auto-contact restored from background state. Setting up periodic refresh.');
+          setupPeriodicRefresh();
+        } else if (isAutoContactEnabled && !isStopped) {
+          // If auto-contact is already enabled, set up periodic refresh
+          setupPeriodicRefresh();
         }
       }
     });
@@ -432,14 +437,56 @@ import type { Lead } from './types';
       pageRefreshTimer = null;
     }
     
-    const refreshDelay = immediate ? 0 : REFRESH_INTERVAL;
+    // Calculate delay - always enforce minimum 30 second gap between refreshes
+    const timeSinceLastRefresh = Date.now() - lastRefreshTime;
+    const minRefreshGap = REFRESH_INTERVAL;
+    
+    let refreshDelay: number;
+    if (immediate) {
+      // Even for "immediate" refresh, ensure at least 30 seconds have passed
+      refreshDelay = Math.max(0, minRefreshGap - timeSinceLastRefresh);
+    } else {
+      // For regular refresh, always use 30 seconds
+      refreshDelay = REFRESH_INTERVAL;
+    }
+    
+    // If a refresh was just done, ensure we wait the full interval
+    if (timeSinceLastRefresh > 0 && timeSinceLastRefresh < minRefreshGap) {
+      refreshDelay = minRefreshGap - timeSinceLastRefresh;
+    }
+    
+    console.log(`[IndiaMART Agent] Scheduling page refresh in ${(refreshDelay / 1000).toFixed(1)} seconds`);
     
     pageRefreshTimer = setTimeout(() => {
       if (!isStopped && isAutoContactEnabled) {
+        lastRefreshTime = Date.now();
         console.log('IndiaMART Agent: Refreshing page...');
         window.location.reload();
       }
     }, refreshDelay);
+  };
+  
+  // Setup automatic refresh every 30 seconds when auto-contact is enabled
+  const setupPeriodicRefresh = () => {
+    if (isStopped || !isAutoContactEnabled) {
+      return;
+    }
+    
+    // Clear any existing timer to avoid duplicates
+    if (pageRefreshTimer) {
+      clearTimeout(pageRefreshTimer);
+      pageRefreshTimer = null;
+    }
+    
+    // Schedule refresh in 30 seconds
+    console.log('[IndiaMART Agent] Setting up periodic refresh - will refresh in 30 seconds');
+    pageRefreshTimer = setTimeout(() => {
+      if (!isStopped && isAutoContactEnabled) {
+        lastRefreshTime = Date.now();
+        console.log('IndiaMART Agent: Periodic refresh - refreshing page now...');
+        window.location.reload();
+      }
+    }, REFRESH_INTERVAL);
   };
 
   const processFilteredLead = async (lead: Lead, cardIndex: number): Promise<boolean> => {
@@ -465,8 +512,8 @@ import type { Lead } from './types';
         
         // Check if all filtered leads have been contacted
         if (contactedLeadsCount >= filteredLeadsCount && isAutoContactEnabled && !isStopped) {
-          console.log('All filtered leads contacted. Refreshing page...');
-          setupPageRefresh(true); // Immediate refresh
+          console.log('All filtered leads contacted. Periodic refresh will handle page refresh.');
+          // Don't trigger immediate refresh - let periodic refresh handle it in 30 seconds
         }
         
         return true;
@@ -542,11 +589,15 @@ import type { Lead } from './types';
       location: l.location
     })));
     
-    // Decide on refresh strategy
+    // Set up periodic refresh every 30 seconds when auto-contact is enabled
+    if (isAutoContactEnabled && !isStopped) {
+      setupPeriodicRefresh();
+    }
+    
+    // Decide on refresh strategy for specific cases
     if (filteredLeadsCount === 0) {
       if (isAutoContactEnabled && !isStopped) {
-        console.log('No filtered leads found. Refreshing page immediately...');
-        setupPageRefresh(true);
+        console.log('No filtered leads found. Periodic refresh already scheduled.');
       } else {
         console.log('No filtered leads found. Auto-contact disabled, no refresh scheduled.');
       }
@@ -600,6 +651,7 @@ import type { Lead } from './types';
     if (message.type === 'ENABLE_AUTO_CONTACT') {
       isAutoContactEnabled = true;
       isStopped = false;
+      setupPeriodicRefresh(); // Set up periodic refresh
       processLeadsWithFiltering();
       sendResponse({ success: true });
       return true;
