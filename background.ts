@@ -18,6 +18,150 @@ let autoContactState = {
 
 let agentActive = false;
 let latestLeadsPayload: { allLeads: Lead[]; filteredLeads: Lead[]; autoContactEnabled?: boolean } | null = null;
+let logProcessingAlarmActive = false;
+let lastSuccessfulLogTime = 0; // Track last successful log save
+const STORAGE_KEY = 'indiamart_logs';
+const MAX_LOG_LINES = 1000;
+let lastInactivityNotify = 0;
+
+const setBadge = (text: string, title: string, color: string) => {
+  try {
+    chrome.action?.setBadgeText({ text });
+    chrome.action?.setBadgeBackgroundColor?.({ color });
+    chrome.action?.setTitle?.({ title });
+  } catch {}
+};
+
+const notify = async (id: string, title: string, message: string) => {
+  try {
+    if (!chrome.notifications) return;
+    await chrome.notifications.create(id, {
+      type: 'basic',
+      iconUrl: 'images/icon128.png',
+      title,
+      message,
+      priority: 0,
+      requireInteraction: false,
+      silent: true
+    });
+  } catch {}
+};
+
+// Save inactivity log entry directly from background script
+const saveInactivityLog = async (inactiveDurationSeconds: number): Promise<void> => {
+  try {
+    const timestamp = new Date().toISOString();
+    const dateStr = new Date().toLocaleString();
+    const minutes = Math.floor(inactiveDurationSeconds / 60);
+    const seconds = inactiveDurationSeconds % 60;
+    
+    // Get existing logs
+    const result = await chrome.storage.local.get(STORAGE_KEY);
+    const existingLogs: string = result[STORAGE_KEY] || '';
+
+    // Create inactivity log entry
+    const logEntry = `\n[${timestamp}] [Background] ⚠️ TAB INACTIVE - Tab was inactive for ${minutes} minutes ${seconds} seconds. Unable to process leads. Waiting for tab to become active...\n`;
+    const combinedLogs = existingLogs + logEntry;
+    
+    // Maintain rolling history
+    const logLines = combinedLogs.split('\n');
+    const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
+
+    // Save to storage
+    await chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
+    console.log(`[Background] Saved inactivity log: ${minutes}m ${seconds}s`);
+  } catch (error) {
+    console.error('[Background] Error saving inactivity log:', error);
+  }
+};
+
+// Setup Chrome Alarm for periodic log processing (heartbeat - keeps service worker alive)
+const setupLogProcessingAlarm = () => {
+  if (logProcessingAlarmActive) {
+    return; // Already set up
+  }
+
+  // Initialize last successful log time
+  lastSuccessfulLogTime = Date.now();
+
+  // Create alarm that fires every 30 seconds (0.5 minutes) - acts as heartbeat
+  // Note: Chrome may throttle to minimum 1 minute, but we try 30 seconds first
+  chrome.alarms.create('processLeadsForLogs', {
+    periodInMinutes: 0.5 // 30 seconds - acts as heartbeat
+  });
+
+  logProcessingAlarmActive = true;
+  console.log('[Background] Heartbeat alarm set up - will trigger every 30 seconds (keeps service worker alive)');
+};
+
+// Clear the alarm when auto-contact is disabled
+const clearLogProcessingAlarm = () => {
+  if (logProcessingAlarmActive) {
+    chrome.alarms.clear('processLeadsForLogs');
+    logProcessingAlarmActive = false;
+    console.log('[Background] Log processing alarm cleared');
+  }
+};
+
+// Listen for alarm events (Heartbeat - keeps service worker alive)
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'processLeadsForLogs') {
+    // Heartbeat alarm fires - keeps service worker alive
+    if (autoContactState.enabled && !autoContactState.stopped) {
+      chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
+        if (tabs.length === 0) {
+          // No tabs found - log inactivity
+          const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
+          if (timeSinceLastLog > 30000) { // Only log if more than 30 seconds
+            saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
+            if (Date.now() - lastInactivityNotify > 5 * 60 * 1000) {
+              notify('indiamart-inactive', 'IndiaMART Agent: Inactive', 'Tab inactive. Waiting for visibility to resume processing.');
+              setBadge('!', 'Inactive: waiting for tab focus', '#ef4444');
+              lastInactivityNotify = Date.now();
+            }
+          }
+          return;
+        }
+
+        let activeTabFound = false;
+        tabs.forEach(tab => {
+          if (tab.id && tab.active) {
+            activeTabFound = true;
+            // Try to communicate with active tab
+            chrome.tabs.sendMessage(tab.id, { type: 'PROCESS_LEADS_FOR_LOGS' }, (response) => {
+              if (chrome.runtime.lastError) {
+                // Tab might be inactive or content script not ready
+                const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
+                if (timeSinceLastLog > 60000) { // Only log if more than 1 minute
+                  saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
+                }
+                console.debug('[Background] Could not send PROCESS_LEADS_FOR_LOGS:', chrome.runtime.lastError.message);
+              } else {
+                // Successfully communicated - update last successful log time
+                lastSuccessfulLogTime = Date.now();
+                setBadge('OK', `Last update: ${new Date().toLocaleTimeString()}`, '#16a34a');
+                notify('indiamart-update', 'IndiaMART Agent: Logs updated', `Updated at ${new Date().toLocaleTimeString()}`);
+              }
+            });
+          }
+        });
+
+        // If no active tab found, check if we should log inactivity
+        if (!activeTabFound) {
+          const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
+          if (timeSinceLastLog > 60000) { // Only log if more than 1 minute
+            saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
+            if (Date.now() - lastInactivityNotify > 5 * 60 * 1000) {
+              notify('indiamart-inactive', 'IndiaMART Agent: Inactive', 'No active tab found. Waiting for visibility.');
+              setBadge('!', 'Inactive: no tab found', '#ef4444');
+              lastInactivityNotify = Date.now();
+            }
+          }
+        }
+      });
+    }
+  }
+});
 
 const sendMessageSafe = (message: unknown) => {
   if (!chrome.runtime || typeof chrome.runtime.sendMessage !== 'function') {
@@ -63,6 +207,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       autoContactState.enabled = true;
       agentActive = false;
       latestLeadsPayload = null;
+      
+      // Setup alarm for periodic log processing
+      setupLogProcessingAlarm();
+      
       if (tabs.length > 0 && tabs[0].id) {
         // If tab exists, focus it and inject the script
         chrome.tabs.update(tabs[0].id, { active: true }, (tab) => {
@@ -93,6 +241,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     autoContactState.enabled = true;
     autoContactState.statistics.sessionStartTime = Date.now();
     
+    // Setup alarm for periodic log processing
+    setupLogProcessingAlarm();
+    
     // Forward to all active IndiaMART tabs
     chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
       tabs.forEach(tab => {
@@ -106,6 +257,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'DISABLE_AUTO_CONTACT') {
     autoContactState.enabled = false;
+    
+    // Clear alarm when auto-contact is disabled
+    clearLogProcessingAlarm();
     
     // Forward to all active IndiaMART tabs
     chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
@@ -142,6 +296,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     autoContactState.stopped = true;
     agentActive = false;
     latestLeadsPayload = null;
+    
+    // Clear alarm when agent is stopped
+    clearLogProcessingAlarm();
     
     // Forward to all active IndiaMART tabs
     chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
@@ -187,6 +344,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       statistics: autoContactState.statistics,
       leadsPayload: latestLeadsPayload,
     });
+    return true;
+  } else if (message.type === 'LOG_PROCESSING_SUCCESS') {
+    // Content script successfully processed and saved logs
+    lastSuccessfulLogTime = Date.now();
     return true;
   }
 });

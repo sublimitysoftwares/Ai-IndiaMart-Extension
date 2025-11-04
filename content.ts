@@ -45,11 +45,14 @@ import type { Lead } from './types';
   let lastContactTime = 0;
   let processedLeads = new Set<string>();
   let pageRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  let periodicProcessInterval: ReturnType<typeof setInterval> | null = null;
   let filteredLeadsCount = 0;
   let contactedLeadsCount = 0;
   let pendingContacts: Lead[] = [];
   let hasLoggedNoLeadCards = false;
   let lastRefreshTime = 0;
+  let lastProcessingTime = Date.now();
+  let isTabVisible = !document.hidden;
 
   const syncAutoContactState = () => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
@@ -68,10 +71,12 @@ import type { Lead } from './types';
         isStopped = Boolean(response.agentStopped);
 
         if (!previousState && isAutoContactEnabled && !isStopped) {
-          console.log('Auto-contact restored from background state. Setting up periodic refresh.');
+          console.log('Auto-contact restored from background state. Setting up periodic refresh and processing.');
+          setupPeriodicProcessing();
           setupPeriodicRefresh();
         } else if (isAutoContactEnabled && !isStopped) {
-          // If auto-contact is already enabled, set up periodic refresh
+          // If auto-contact is already enabled, set up periodic refresh and processing
+          setupPeriodicProcessing();
           setupPeriodicRefresh();
         }
       }
@@ -466,6 +471,32 @@ import type { Lead } from './types';
     }, refreshDelay);
   };
   
+  // Setup periodic processing every 30 seconds to save logs regularly
+  const setupPeriodicProcessing = () => {
+    if (isStopped || !isAutoContactEnabled) {
+      return;
+    }
+    
+    // Clear any existing interval to avoid duplicates
+    if (periodicProcessInterval) {
+      clearInterval(periodicProcessInterval);
+      periodicProcessInterval = null;
+    }
+    
+    // Process leads every 30 seconds to ensure logs are saved regularly
+    console.log('[IndiaMART Agent] Setting up periodic processing - will process and save logs every 30 seconds');
+    periodicProcessInterval = setInterval(() => {
+      if (!isStopped && isAutoContactEnabled && !document.hidden) {
+        // Only process when tab is visible
+        const timeSinceLastProcessing = Date.now() - lastProcessingTime;
+        if (timeSinceLastProcessing >= REFRESH_INTERVAL - 5000) { // Process if 25+ seconds have passed
+          console.log('[IndiaMART Agent] Periodic processing - processing leads and saving logs...');
+          processLeadsWithFiltering();
+        }
+      }
+    }, REFRESH_INTERVAL);
+  };
+
   // Setup automatic refresh every 30 seconds when auto-contact is enabled
   const setupPeriodicRefresh = () => {
     if (isStopped || !isAutoContactEnabled) {
@@ -526,6 +557,7 @@ import type { Lead } from './types';
   };
 
   // Storage helper functions for readable log storage
+  // Note: These constants must match background.ts for consistency
   const STORAGE_KEY = 'indiamart_logs';
   const MAX_LOG_LINES = 1000; // Maximum number of log lines to keep
 
@@ -587,6 +619,9 @@ import type { Lead } from './types';
 
   const processLeadsWithFiltering = async () => {
     if (isStopped) return;
+    
+    // Update last processing time
+    lastProcessingTime = Date.now();
     
     const leads = scrapeLeads();
     const filteredLeads: Lead[] = [];
@@ -657,9 +692,17 @@ import type { Lead } from './types';
       filteredLeads
     );
     
-    // Set up periodic refresh every 30 seconds when auto-contact is enabled
+    // Notify popup/background that logs were updated
+    try {
+      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'LOGS_UPDATED' });
+      }
+    } catch {}
+    
+    // Set up periodic refresh and processing every 30 seconds when auto-contact is enabled
     if (isAutoContactEnabled && !isStopped) {
-      setupPeriodicRefresh();
+      setupPeriodicProcessing(); // Process and save logs every 30 seconds
+      setupPeriodicRefresh(); // Refresh page every 30 seconds
     }
     
     // Decide on refresh strategy for specific cases
@@ -692,6 +735,67 @@ import type { Lead } from './types';
     }
   };
 
+  // Handle tab visibility changes - Enhanced visibility detection
+  let lastVisibilityChangeTime = Date.now();
+  let tabWentInactiveTime = 0;
+
+  document.addEventListener('visibilitychange', () => {
+    const wasVisible = isTabVisible;
+    isTabVisible = !document.hidden;
+    const timestamp = new Date().toISOString();
+
+    if (!isTabVisible && wasVisible) {
+      // Tab became inactive
+      tabWentInactiveTime = Date.now();
+      console.log('[IndiaMART Agent] Tab became INACTIVE - logging status...');
+      
+      // Save inactive status log
+      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.get(STORAGE_KEY, (result) => {
+          const existingLogs: string = result[STORAGE_KEY] || '';
+          const inactiveLog = `\n[${timestamp}] [Content Script] ⚠️ TAB BECAME INACTIVE - Tab is now in background. Logging will resume when tab becomes active.\n`;
+          const combinedLogs = existingLogs + inactiveLog;
+          const logLines = combinedLogs.split('\n');
+          const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
+          chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
+        });
+      }
+    }
+
+    if (isTabVisible && !wasVisible) {
+      // Tab became visible again
+      const timeInactive = tabWentInactiveTime > 0 ? Date.now() - tabWentInactiveTime : Date.now() - lastProcessingTime;
+      const minutesInactive = Math.floor(timeInactive / 60000);
+      const secondsInactive = Math.floor((timeInactive % 60000) / 1000);
+      
+      console.log(`[IndiaMART Agent] ✅ Tab became VISIBLE after ${minutesInactive}m ${secondsInactive}s. Resuming processing...`);
+      
+      // Save resume log entry
+      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.get(STORAGE_KEY, (result) => {
+          const existingLogs: string = result[STORAGE_KEY] || '';
+          const resumeLog = `\n[${timestamp}] [Content Script] ✅ TAB RESUMED - Tab became active after ${minutesInactive} minutes ${secondsInactive} seconds. Processing leads now...\n`;
+          const combinedLogs = existingLogs + resumeLog;
+          const logLines = combinedLogs.split('\n');
+          const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
+          chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
+        });
+      }
+      
+      if (isAutoContactEnabled && !isStopped) {
+        // Process leads immediately when tab becomes visible
+        setTimeout(() => {
+          processLeadsWithFiltering();
+        }, 1000); // Small delay to ensure page is fully loaded
+      }
+      
+      tabWentInactiveTime = 0; // Reset
+    }
+    
+    lastProcessingTime = Date.now();
+    lastVisibilityChangeTime = Date.now();
+  });
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== 'object') {
       return;
@@ -719,6 +823,7 @@ import type { Lead } from './types';
     if (message.type === 'ENABLE_AUTO_CONTACT') {
       isAutoContactEnabled = true;
       isStopped = false;
+      setupPeriodicProcessing(); // Set up periodic processing for logs
       setupPeriodicRefresh(); // Set up periodic refresh
       processLeadsWithFiltering();
       sendResponse({ success: true });
@@ -731,6 +836,10 @@ import type { Lead } from './types';
         clearTimeout(pageRefreshTimer);
         pageRefreshTimer = null;
       }
+      if (periodicProcessInterval) {
+        clearInterval(periodicProcessInterval);
+        periodicProcessInterval = null;
+      }
       sendResponse({ success: true });
       return true;
     }
@@ -742,6 +851,10 @@ import type { Lead } from './types';
         clearTimeout(pageRefreshTimer);
         pageRefreshTimer = null;
       }
+      if (periodicProcessInterval) {
+        clearInterval(periodicProcessInterval);
+        periodicProcessInterval = null;
+      }
       console.log('Agent stopped by user');
       sendResponse({ success: true });
       return true;
@@ -750,6 +863,20 @@ import type { Lead } from './types';
     if (message.type === 'SCRAPE_AND_FILTER') {
       processLeadsWithFiltering();
       sendResponse({ success: true });
+      return true;
+    }
+    
+    if (message.type === 'PROCESS_LEADS_FOR_LOGS') {
+      // Background script requested processing for logs (via alarm/heartbeat)
+      // This ensures logs are saved even when tab might be inactive
+      if (isAutoContactEnabled && !isStopped) {
+        processLeadsWithFiltering();
+        // Notify background that processing was successful
+        chrome.runtime.sendMessage({ type: 'LOG_PROCESSING_SUCCESS' });
+        sendResponse({ success: true });
+      } else {
+        sendResponse({ success: false, reason: 'Auto-contact disabled or stopped' });
+      }
       return true;
     }
   });

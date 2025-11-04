@@ -4,6 +4,7 @@
 import React, { useState, useEffect } from 'react';
 import type { Lead } from './types';
 import { LeadCard } from './components/LeadCard';
+import { LogsPanel } from './components/LogsPanel';
 
 enum AppState {
   Idle,
@@ -35,6 +36,7 @@ const App: React.FC = () => {
   const [showFilterDetails, setShowFilterDetails] = useState(false);
   const [agentInitialized, setAgentInitialized] = useState(false);
   const agentStoppedRef = React.useRef(false);
+  const [showLogs, setShowLogs] = useState(false);
 
   const sortedLeads = React.useMemo(() => {
     const arr = [...leads];
@@ -405,8 +407,21 @@ const App: React.FC = () => {
             Stop Agent
           </button>
         </div>
+        <div className="mt-2 flex items-center gap-2">
+          <button
+            onClick={() => setShowLogs((v) => !v)}
+            className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded-md"
+          >
+            {showLogs ? 'Hide Logs' : 'Show Logs'}
+          </button>
+        </div>
       </header>
       <main>
+        {showLogs && (
+          <div className="border-b border-slate-800">
+            <LogsPanel onClose={() => setShowLogs(false)} />
+          </div>
+        )}
         {renderContent()}
       </main>
     </div>
