@@ -5,7 +5,9 @@
   "description": "Automates lead scraping and analysis on IndiaMART Seller Portal.",
   "permissions": [
     "tabs",
-    "scripting"
+    "scripting",
+    "activeTab",
+    "storage"
   ],
   "host_permissions": [
     "https://seller.indiamart.com/*"
@@ -39,6 +41,6 @@
     }
   ],
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://generativelanguage.googleapis.com;"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' https://aistudiocdn.com https://generativelanguage.googleapis.com;"
   }
 }

@@ -525,6 +525,66 @@ import type { Lead } from './types';
     return false;
   };
 
+  // Storage helper functions for readable log storage
+  const STORAGE_KEY = 'indiamart_logs';
+  const MAX_LOG_LINES = 1000; // Maximum number of log lines to keep
+
+  const saveFilteringSummaryToStorage = async (
+    totalLeads: number,
+    filteredLeadsCount: number,
+    rejectedLeads: number,
+    filteredLeads: Lead[]
+  ): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      console.warn('[IndiaMART Agent] Chrome storage API not available');
+      return;
+    }
+
+    try {
+      const timestamp = new Date().toISOString();
+      const dateStr = new Date().toLocaleString();
+      
+      // Get existing logs
+      const result = await chrome.storage.local.get(STORAGE_KEY);
+      const existingLogs: string = result[STORAGE_KEY] || '';
+
+      // Create readable log entries
+      const logEntries: string[] = [];
+      
+      logEntries.push(`\n========== FILTERING SUMMARY - ${dateStr} ==========`);
+      logEntries.push(`[${timestamp}] [IndiaMART Agent] ========== FILTERING SUMMARY ==========`);
+      logEntries.push(`[${timestamp}] [IndiaMART Agent] Total leads: ${totalLeads}`);
+      logEntries.push(`[${timestamp}] [IndiaMART Agent] Filtered (qualified) leads: ${filteredLeadsCount}`);
+      logEntries.push(`[${timestamp}] [IndiaMART Agent] Rejected leads: ${rejectedLeads}`);
+      
+      if (filteredLeads.length > 0) {
+        logEntries.push(`[${timestamp}] [IndiaMART Agent] Filtered leads list:`);
+        filteredLeads.forEach((lead, index) => {
+          logEntries.push(`[${timestamp}] [IndiaMART Agent]   ${index + 1}. Company: ${lead.companyName}, Enquiry: ${lead.enquiryTitle}, Location: ${lead.location}`);
+        });
+      } else {
+        logEntries.push(`[${timestamp}] [IndiaMART Agent] Filtered leads list: Array(0)`);
+      }
+      
+      logEntries.push(`[${timestamp}] [IndiaMART Agent] URL: ${window.location.href}`);
+      logEntries.push(`========== END SUMMARY ==========\n`);
+
+      // Combine new logs with existing logs
+      const newLogs = logEntries.join('\n');
+      const combinedLogs = existingLogs + '\n' + newLogs;
+
+      // Split into lines and keep only last MAX_LOG_LINES
+      const logLines = combinedLogs.split('\n');
+      const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
+
+      // Save to storage
+      await chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
+      console.log('[IndiaMART Agent] Filtering summary logs saved to Chrome storage');
+    } catch (error) {
+      console.error('[IndiaMART Agent] Error saving filtering summary logs to storage:', error);
+    }
+  };
+
   const processLeadsWithFiltering = async () => {
     if (isStopped) return;
     
@@ -588,6 +648,14 @@ import type { Lead } from './types';
       enquiry: l.enquiryTitle,
       location: l.location
     })));
+    
+    // Save filtering summary to Chrome storage
+    await saveFilteringSummaryToStorage(
+      leads.length,
+      filteredLeadsCount,
+      leads.length - filteredLeadsCount,
+      filteredLeads
+    );
     
     // Set up periodic refresh every 30 seconds when auto-contact is enabled
     if (isAutoContactEnabled && !isStopped) {
