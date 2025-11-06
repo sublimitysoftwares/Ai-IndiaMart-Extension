@@ -35,8 +35,11 @@ import type { Lead } from './types';
   const REFRESH_INTERVAL = 30 * 1000; // 30 seconds
   const MIN_CONTACT_DELAY = 10 * 1000; // 10 seconds
   const MAX_CONTACT_DELAY = 5 * 60 * 1000; // 5 minutes
-  const CONTACT_REPLY_DELAY_MIN = 4 * 60 * 1000; // 4 minutes
-  const CONTACT_REPLY_DELAY_MAX = 6 * 60 * 1000; // 6 minutes
+  const CONTACT_REPLY_DELAY_MIN = 4 * 60 * 1000; // 4 minutes (legacy, unused)
+  const CONTACT_REPLY_DELAY_MAX = 6 * 60 * 1000; // 6 minutes (legacy, unused)
+  // New: wait BEFORE contacting (randomized 5–15 minutes), then send immediately
+  const PRE_CONTACT_DELAY_MIN = 5 * 60 * 1000; // 5 minutes
+  const PRE_CONTACT_DELAY_MAX = 15 * 60 * 1000; // 15 minutes
   const MAX_CONTACT_GAP = 15 * 60 * 1000; // 15 minutes
   
   // State management
@@ -333,11 +336,20 @@ import type { Lead } from './types';
     return null;
   };
 
-  const performContactFlow = async (cardIndex: number): Promise<{ success: boolean; error?: string }> => {
+  const performContactFlow = async (cardIndex: number, preContactDelayMs?: number): Promise<{ success: boolean; error?: string }> => {
     const cards = getLeadCardElements();
     const card = cards[cardIndex];
     if (!card) {
       return { success: false, error: `Lead card at index ${cardIndex} not found.` };
+    }
+
+    // Optional pre-contact randomized delay (5–15 minutes) before clicking Contact Buyer Now
+    if (typeof preContactDelayMs === 'number' && preContactDelayMs > 0) {
+      console.log(`[IndiaMART Agent] Waiting ${(preContactDelayMs / 60000).toFixed(2)} minutes before contacting...`);
+      await new Promise((resolve) => setTimeout(resolve, preContactDelayMs));
+      if (isStopped || !isAutoContactEnabled) {
+        return { success: false, error: 'Agent stopped or auto-contact disabled before starting contact.' };
+      }
     }
 
     const contactButton = await waitForElement(() => findElementByText(card, 'button, a', CONTACT_BUTTON_TEXT), 5000);
@@ -356,18 +368,7 @@ import type { Lead } from './types';
     if (!replyButton) {
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
-
-    const replyDelay =
-      CONTACT_REPLY_DELAY_MIN + Math.random() * (CONTACT_REPLY_DELAY_MAX - CONTACT_REPLY_DELAY_MIN);
-    console.log(
-      `[IndiaMART Agent] Waiting ${(replyDelay / 60000).toFixed(2)} minutes before sending reply...`
-    );
-    await new Promise((resolve) => setTimeout(resolve, replyDelay));
-
-    if (isStopped || !isAutoContactEnabled) {
-      return { success: false, error: 'Agent stopped or auto-contact disabled before sending reply.' };
-    }
-
+    // New behavior: click Send Reply immediately (no additional randomized wait here)
     replyButton.click();
 
     return { success: true };
@@ -520,11 +521,11 @@ import type { Lead } from './types';
     }, REFRESH_INTERVAL);
   };
 
-  const processFilteredLead = async (lead: Lead, cardIndex: number): Promise<boolean> => {
+  const processFilteredLead = async (lead: Lead, cardIndex: number, preContactDelayMs?: number): Promise<boolean> => {
     if (!isAutoContactEnabled || isStopped) return false;
     
     try {
-      const result = await performContactFlow(cardIndex);
+      const result = await performContactFlow(cardIndex, preContactDelayMs);
       if (result.success) {
         processedLeads.add(lead.leadId);
         lastContactTime = Date.now();
@@ -749,24 +750,16 @@ import type { Lead } from './types';
         console.log('No filtered leads found. Auto-contact disabled, no refresh scheduled.');
       }
     } else if (isAutoContactEnabled && !isStopped) {
-      // Process contacts with proper timing
+      // Schedule contacts: wait 5–15 minutes BEFORE contacting, then send reply immediately
       for (let i = 0; i < pendingContacts.length; i++) {
         const lead = pendingContacts[i];
-        const timeSinceLastContact = Date.now() - lastContactTime;
-        
-        // Calculate delay
-        let delay: number;
-        if (lastContactTime === 0 || timeSinceLastContact > MAX_CONTACT_GAP) {
-          delay = 0; // Contact immediately
-        } else {
-          delay = getRandomDelay();
-        }
-        
+        const preDelay = PRE_CONTACT_DELAY_MIN + Math.random() * (PRE_CONTACT_DELAY_MAX - PRE_CONTACT_DELAY_MIN);
+        const jitter = i * 1000; // slight staggering between leads
         setTimeout(() => {
-          if (!isStopped) {
-            processFilteredLead(lead, lead.cardIndex || 0);
+          if (!isStopped && isAutoContactEnabled) {
+            processFilteredLead(lead, lead.cardIndex || 0, preDelay);
           }
-        }, delay + (i * 1000)); // Add extra spacing between scheduled contacts
+        }, jitter);
       }
     }
   };
