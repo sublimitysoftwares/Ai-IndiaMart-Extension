@@ -20,8 +20,9 @@ let agentActive = false;
 let latestLeadsPayload: { allLeads: Lead[]; filteredLeads: Lead[]; autoContactEnabled?: boolean } | null = null;
 let logProcessingAlarmActive = false;
 let lastSuccessfulLogTime = 0; // Track last successful log save
-const STORAGE_KEY = 'indiamart_logs';
+const DIAGNOSTICS_KEY = 'indiamart_diagnostics';
 const MAX_LOG_LINES = 1000;
+const DIAGNOSTICS_ENABLED = false; // default off for main logs cleanliness
 let lastInactivityNotify = 0;
 
 const setBadge = (text: string, title: string, color: string) => {
@@ -54,22 +55,24 @@ const saveInactivityLog = async (inactiveDurationSeconds: number): Promise<void>
     const dateStr = new Date().toLocaleString();
     const minutes = Math.floor(inactiveDurationSeconds / 60);
     const seconds = inactiveDurationSeconds % 60;
-    
-    // Get existing logs
-    const result = await chrome.storage.local.get(STORAGE_KEY);
-    const existingLogs: string = result[STORAGE_KEY] || '';
+    if (!DIAGNOSTICS_ENABLED) {
+      return; // Do not write inactivity into main logs by default
+    }
 
-    // Create inactivity log entry
-    const logEntry = `\n[${timestamp}] [Background] ⚠️ TAB INACTIVE - Tab was inactive for ${minutes} minutes ${seconds} seconds. Unable to process leads. Waiting for tab to become active...\n`;
-    const combinedLogs = existingLogs + logEntry;
+    // Get existing diagnostics
+    const result = await chrome.storage.local.get(DIAGNOSTICS_KEY);
+    const existingDiag: string = result[DIAGNOSTICS_KEY] || '';
+
+    // Create inactivity log entry (diagnostics only)
+    const logEntry = `\n[${timestamp}] [Background] ⚠️ Inactive: background running; waiting for page visibility. Gap ${minutes}m ${seconds}s.\n`;
+    const combined = existingDiag + logEntry;
     
     // Maintain rolling history
-    const logLines = combinedLogs.split('\n');
-    const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
+    const logLines = combined.split('\n');
+    const trimmed = logLines.slice(-MAX_LOG_LINES).join('\n');
 
     // Save to storage
-    await chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
-    console.log(`[Background] Saved inactivity log: ${minutes}m ${seconds}s`);
+    await chrome.storage.local.set({ [DIAGNOSTICS_KEY]: trimmed });
   } catch (error) {
     console.error('[Background] Error saving inactivity log:', error);
   }
@@ -137,10 +140,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
                 }
                 console.debug('[Background] Could not send PROCESS_LEADS_FOR_LOGS:', chrome.runtime.lastError.message);
               } else {
-                // Successfully communicated - update last successful log time
+                // Successfully communicated - content will emit LOGS_UPDATED if something actually changed
                 lastSuccessfulLogTime = Date.now();
-                setBadge('OK', `Last update: ${new Date().toLocaleTimeString()}`, '#16a34a');
-                notify('indiamart-update', 'IndiaMART Agent: Logs updated', `Updated at ${new Date().toLocaleTimeString()}`);
               }
             });
           }
@@ -346,8 +347,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   } else if (message.type === 'LOG_PROCESSING_SUCCESS') {
-    // Content script successfully processed and saved logs
+    // Content script processed, but we only notify UI on actual change (LOGS_UPDATED)
     lastSuccessfulLogTime = Date.now();
+    return true;
+  } else if (message.type === 'LOGS_UPDATED') {
+    // A real change was saved; update badge and notify once per change
+    lastSuccessfulLogTime = Date.now();
+    setBadge('OK', `Last update: ${new Date().toLocaleTimeString()}`, '#16a34a');
+    notify('indiamart-update', 'IndiaMART Agent: Logs updated', `Updated at ${new Date().toLocaleTimeString()}`);
     return true;
   }
 });

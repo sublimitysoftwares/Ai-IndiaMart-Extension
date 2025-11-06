@@ -1,26 +1,32 @@
 /// <reference types="chrome" />
 import React, { useEffect, useRef, useState } from 'react';
 
-const STORAGE_KEY = 'indiamart_logs';
+const SUMMARIES_KEY = 'indiamart_summaries';
+const DIAGNOSTICS_KEY = 'indiamart_diagnostics';
 
 interface LogsPanelProps {
   onClose?: () => void;
 }
 
 export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
-  const [logs, setLogs] = useState<string>('');
+  const [summaries, setSummaries] = useState<string[]>([]);
+  const [diagnostics, setDiagnostics] = useState<string>('');
   const [filter, setFilter] = useState<string>('');
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [paused, setPaused] = useState<boolean>(false);
+  const [showHistory, setShowHistory] = useState<boolean>(false);
+  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<number>(Date.now());
   const containerRef = useRef<HTMLDivElement>(null);
 
   const loadLogs = () => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
-    chrome.storage.local.get(STORAGE_KEY, (result) => {
-      const value: string = result[STORAGE_KEY] || '';
+    chrome.storage.local.get([SUMMARIES_KEY, DIAGNOSTICS_KEY], (result) => {
+      const sums: string[] = Array.isArray(result[SUMMARIES_KEY]) ? result[SUMMARIES_KEY] : [];
+      const diag: string = result[DIAGNOSTICS_KEY] || '';
       if (!paused) {
-        setLogs(value);
+        setSummaries(sums);
+        setDiagnostics(diag);
         setLastUpdated(Date.now());
       }
     });
@@ -32,8 +38,14 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
     // Listen for storage changes
     if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
       const handleChange: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (changes, areaName) => {
-        if (areaName === 'local' && changes[STORAGE_KEY] && !paused) {
-          setLogs(changes[STORAGE_KEY].newValue || '');
+        if (areaName !== 'local' || paused) return;
+        if (changes[SUMMARIES_KEY]) {
+          const sums: string[] = Array.isArray(changes[SUMMARIES_KEY].newValue) ? changes[SUMMARIES_KEY].newValue : [];
+          setSummaries(sums);
+          setLastUpdated(Date.now());
+        }
+        if (changes[DIAGNOSTICS_KEY]) {
+          setDiagnostics(changes[DIAGNOSTICS_KEY].newValue || '');
           setLastUpdated(Date.now());
         }
       };
@@ -58,15 +70,22 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
     if (autoScroll && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-  }, [logs, autoScroll]);
+  }, [summaries, diagnostics, showHistory, showDiagnostics, autoScroll]);
 
   const clearLogs = () => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
-    chrome.storage.local.set({ [STORAGE_KEY]: '' }, () => loadLogs());
+    chrome.storage.local.set({ [SUMMARIES_KEY]: [], [DIAGNOSTICS_KEY]: '' }, () => loadLogs());
   };
 
   const exportLogs = () => {
-    const blob = new Blob([logs], { type: 'text/plain;charset=utf-8' });
+    const body = [
+      '=== Summaries ===',
+      ...(summaries.length ? summaries : ['<none>']),
+      '',
+      '=== Diagnostics ===',
+      diagnostics || '<none>'
+    ].join('\n');
+    const blob = new Blob([body], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -75,11 +94,14 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
     URL.revokeObjectURL(url);
   };
 
-  const filtered = React.useMemo(() => {
-    if (!filter.trim()) return logs;
-    const lines = logs.split('\n');
-    return lines.filter((l) => l.toLowerCase().includes(filter.toLowerCase())).join('\n');
-  }, [logs, filter]);
+  const latestSummary = summaries.length ? summaries[summaries.length - 1] : '';
+  const historySummaries = showHistory ? summaries.slice().reverse().join('\n\n') : latestSummary;
+  const mainText = React.useMemo(() => {
+    const source = showHistory ? historySummaries : latestSummary;
+    if (!filter.trim()) return source || 'No summaries yet.';
+    const lines = (source || '').split('\n');
+    return lines.filter((l) => l.toLowerCase().includes(filter.toLowerCase())).join('\n') || 'No match.';
+  }, [historySummaries, latestSummary, showHistory, filter]);
 
   return (
     <div className="p-3 bg-slate-900 text-slate-200">
@@ -108,9 +130,17 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
           <input type="checkbox" checked={autoScroll} onChange={(e) => setAutoScroll(e.target.checked)} />
           Auto-scroll
         </label>
+        <label className="flex items-center gap-1 text-[11px] text-slate-300">
+          <input type="checkbox" checked={showHistory} onChange={(e) => setShowHistory(e.target.checked)} />
+          Show history
+        </label>
+        <label className="flex items-center gap-1 text-[11px] text-slate-300">
+          <input type="checkbox" checked={showDiagnostics} onChange={(e) => setShowDiagnostics(e.target.checked)} />
+          Show diagnostics
+        </label>
       </div>
       <div ref={containerRef} className="h-64 overflow-auto bg-slate-950 border border-slate-800 rounded p-2 text-[11px] whitespace-pre-wrap">
-        {filtered || 'No logs yet.'}
+        {showDiagnostics ? (diagnostics || 'No diagnostics.') : (mainText)}
       </div>
     </div>
   );

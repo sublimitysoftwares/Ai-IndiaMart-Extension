@@ -556,10 +556,16 @@ import type { Lead } from './types';
     return false;
   };
 
-  // Storage helper functions for readable log storage
+  // Storage helper functions and keys
   // Note: These constants must match background.ts for consistency
-  const STORAGE_KEY = 'indiamart_logs';
-  const MAX_LOG_LINES = 1000; // Maximum number of log lines to keep
+  const STORAGE_KEY = 'indiamart_logs'; // legacy diagnostics stream (optional)
+  const SUMMARIES_KEY = 'indiamart_summaries'; // array of summary blocks
+  const DIAGNOSTICS_KEY = 'indiamart_diagnostics'; // diagnostics stream (optional)
+  const MAX_LOG_LINES = 1000; // Maximum number of diagnostic log lines to keep
+  const MAX_SUMMARIES = 20; // keep last N summaries
+  const DIAGNOSTICS_ENABLED = false; // default off
+
+  const LAST_SIGNATURE_KEY = 'indiamart_last_signature';
 
   const saveFilteringSummaryToStorage = async (
     totalLeads: number,
@@ -575,10 +581,32 @@ import type { Lead } from './types';
     try {
       const timestamp = new Date().toISOString();
       const dateStr = new Date().toLocaleString();
-      
-      // Get existing logs
-      const result = await chrome.storage.local.get(STORAGE_KEY);
-      const existingLogs: string = result[STORAGE_KEY] || '';
+
+      // Build a stable signature of the meaningful data
+      const signaturePayload = {
+        totalLeads,
+        filteredLeadsCount,
+        rejectedLeads,
+        filtered: filteredLeads.map(l => ({
+          id: l.leadId,
+          c: l.companyName,
+          e: l.enquiryTitle,
+          loc: l.location
+        }))
+      };
+      const signature = JSON.stringify(signaturePayload);
+
+      // Get existing summaries/diagnostics and previous signature
+      const result = await chrome.storage.local.get([SUMMARIES_KEY, DIAGNOSTICS_KEY, LAST_SIGNATURE_KEY]);
+      const existingSummaries: string[] = Array.isArray(result[SUMMARIES_KEY]) ? result[SUMMARIES_KEY] : [];
+      const existingDiagnostics: string = result[DIAGNOSTICS_KEY] || '';
+      const previousSignature: string | undefined = result[LAST_SIGNATURE_KEY];
+
+      // If nothing changed, skip writing logs
+      if (previousSignature === signature) {
+        console.log('[IndiaMART Agent] No change in filtering summary. Skipping log write.');
+        return;
+      }
 
       // Create readable log entries
       const logEntries: string[] = [];
@@ -601,17 +629,25 @@ import type { Lead } from './types';
       logEntries.push(`[${timestamp}] [IndiaMART Agent] URL: ${window.location.href}`);
       logEntries.push(`========== END SUMMARY ==========\n`);
 
-      // Combine new logs with existing logs
-      const newLogs = logEntries.join('\n');
-      const combinedLogs = existingLogs + '\n' + newLogs;
+      // Final summary block (only this goes to summaries)
+      const summaryBlock = logEntries.join('\n');
 
-      // Split into lines and keep only last MAX_LOG_LINES
-      const logLines = combinedLogs.split('\n');
-      const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
+      // Append to summaries with cap
+      const newSummaries = [...existingSummaries, summaryBlock].slice(-MAX_SUMMARIES);
 
-      // Save to storage
-      await chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
-      console.log('[IndiaMART Agent] Filtering summary logs saved to Chrome storage');
+      // Optionally append to diagnostics stream
+      let newDiagnostics = existingDiagnostics;
+      if (DIAGNOSTICS_ENABLED) {
+        const combined = existingDiagnostics + '\n' + summaryBlock;
+        const diagLines = combined.split('\n');
+        newDiagnostics = diagLines.slice(-MAX_LOG_LINES).join('\n');
+      }
+
+      // Save to storage and update last signature
+      const toSave: Record<string, any> = { [SUMMARIES_KEY]: newSummaries, [LAST_SIGNATURE_KEY]: signature };
+      if (DIAGNOSTICS_ENABLED) toSave[DIAGNOSTICS_KEY] = newDiagnostics;
+      await chrome.storage.local.set(toSave);
+      console.log('[IndiaMART Agent] Filtering summary saved to Chrome storage (summaries list)');
     } catch (error) {
       console.error('[IndiaMART Agent] Error saving filtering summary logs to storage:', error);
     }
@@ -749,15 +785,15 @@ import type { Lead } from './types';
       tabWentInactiveTime = Date.now();
       console.log('[IndiaMART Agent] Tab became INACTIVE - logging status...');
       
-      // Save inactive status log
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        chrome.storage.local.get(STORAGE_KEY, (result) => {
-          const existingLogs: string = result[STORAGE_KEY] || '';
-          const inactiveLog = `\n[${timestamp}] [Content Script] ⚠️ TAB BECAME INACTIVE - Tab is now in background. Logging will resume when tab becomes active.\n`;
-          const combinedLogs = existingLogs + inactiveLog;
-          const logLines = combinedLogs.split('\n');
-          const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
-          chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
+      // Save inactive status to diagnostics only (optional)
+      if (DIAGNOSTICS_ENABLED && typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.get(DIAGNOSTICS_KEY, (result) => {
+          const existingDiag: string = result[DIAGNOSTICS_KEY] || '';
+          const inactiveLog = `\n[${timestamp}] [Content Script] ⚠️ Tab hidden: background checks continue; page scraping paused. Will scrape again when visible.\n`;
+          const combined = existingDiag + inactiveLog;
+          const lines = combined.split('\n');
+          const trimmed = lines.slice(-MAX_LOG_LINES).join('\n');
+          chrome.storage.local.set({ [DIAGNOSTICS_KEY]: trimmed });
         });
       }
     }
@@ -770,15 +806,15 @@ import type { Lead } from './types';
       
       console.log(`[IndiaMART Agent] ✅ Tab became VISIBLE after ${minutesInactive}m ${secondsInactive}s. Resuming processing...`);
       
-      // Save resume log entry
-      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-        chrome.storage.local.get(STORAGE_KEY, (result) => {
-          const existingLogs: string = result[STORAGE_KEY] || '';
-          const resumeLog = `\n[${timestamp}] [Content Script] ✅ TAB RESUMED - Tab became active after ${minutesInactive} minutes ${secondsInactive} seconds. Processing leads now...\n`;
-          const combinedLogs = existingLogs + resumeLog;
-          const logLines = combinedLogs.split('\n');
-          const trimmedLogs = logLines.slice(-MAX_LOG_LINES).join('\n');
-          chrome.storage.local.set({ [STORAGE_KEY]: trimmedLogs });
+      // Save resume log to diagnostics only (optional)
+      if (DIAGNOSTICS_ENABLED && typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.get(DIAGNOSTICS_KEY, (result) => {
+          const existingDiag: string = result[DIAGNOSTICS_KEY] || '';
+          const resumeLog = `\n[${timestamp}] [Content Script] ✅ Tab visible: resuming page scraping after ${minutesInactive}m ${secondsInactive}s.\n`;
+          const combined = existingDiag + resumeLog;
+          const lines = combined.split('\n');
+          const trimmed = lines.slice(-MAX_LOG_LINES).join('\n');
+          chrome.storage.local.set({ [DIAGNOSTICS_KEY]: trimmed });
         });
       }
       
