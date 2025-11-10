@@ -80,11 +80,21 @@ const App: React.FC = () => {
           setLeads(response.leadsPayload.allLeads || []);
           setFilteredLeads(response.leadsPayload.filteredLeads || []);
           setAutoContactEnabled(Boolean(response.autoContactEnabled));
-          setAutoContactStats((prev) => ({
-            ...prev,
-            totalFiltered: response.leadsPayload.filteredLeads?.length || prev.totalFiltered,
-            totalContacted: response.statistics?.totalContacted || prev.totalContacted,
-          }));
+          setAutoContactStats((prev) => {
+            const newFilteredLeads = response.leadsPayload?.filteredLeads;
+            const filteredCount = Array.isArray(newFilteredLeads)
+              ? newFilteredLeads.length
+              : prev.totalFiltered;
+            const contactedCount =
+              typeof response.statistics?.totalContacted === 'number'
+                ? response.statistics.totalContacted
+                : prev.totalContacted;
+            return {
+              ...prev,
+              totalFiltered: filteredCount,
+              totalContacted: contactedCount,
+            };
+          });
           setAgentStopped(Boolean(response.agentStopped));
           agentStoppedRef.current = Boolean(response.agentStopped);
           setAgentInitialized(true);
@@ -123,18 +133,35 @@ const App: React.FC = () => {
             setAgentInitialized(true);
             setAgentStopped(false);
             agentStoppedRef.current = false;
-            setAutoContactStats(prev => ({
-              ...prev,
-              totalFiltered: message.payload.filteredLeads?.length ?? prev.totalFiltered
-            }));
+            setAutoContactStats(prev => {
+              const newFilteredLeads = message.payload?.filteredLeads;
+              const filteredCount = Array.isArray(newFilteredLeads)
+                ? newFilteredLeads.length
+                : prev.totalFiltered;
+              return {
+                ...prev,
+                totalFiltered: filteredCount
+              };
+            });
           }
         } else if (message.type === 'AUTO_CONTACT_UPDATE') {
           if (!agentStoppedRef.current) {
             // Update stats when a lead is contacted
-            setAutoContactStats(prev => ({
-              ...prev,
-              totalContacted: message.statistics?.totalContacted || prev.totalContacted + 1
-            }));
+            setAutoContactStats(prev => {
+              const totalContacted =
+                typeof message.statistics?.totalContacted === 'number'
+                  ? message.statistics.totalContacted
+                  : prev.totalContacted + 1;
+              const totalFiltered =
+                typeof message.statistics?.totalFiltered === 'number'
+                  ? message.statistics.totalFiltered
+                  : prev.totalFiltered;
+              return {
+                ...prev,
+                totalContacted,
+                totalFiltered
+              };
+            });
           }
         } else if (message.type === 'SCRAPING_ERROR') {
             setError(message.error);
@@ -333,8 +360,8 @@ const App: React.FC = () => {
                  <div className="mt-2 p-2 bg-slate-900/50 rounded text-xs space-y-1 text-slate-400">
                    <div>✓ Keywords: Uniform, Blazers, Jackets, etc.</div>
                    <div>✓ Excluded: Delhi, Mumbai, Gurgaon, Ahmedabad, Surat, Thane</div>
-                   <div>✓ Quantity: {'>'} 100 units</div>
-                   <div>✓ Order Value: {'>'} ₹50,000</div>
+                   <div>✓ Quantity: ≥ 100 pieces</div>
+                  <div>✓ Order Value: ≥ ₹10,000</div>
                    <div>✓ Categories: School/Corporate/Hospital Uniforms</div>
                  </div>
                )}

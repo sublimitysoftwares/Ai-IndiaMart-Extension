@@ -2,6 +2,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 
 const SUMMARIES_KEY = 'indiamart_summaries';
+const LEAD_LOGS_KEY = 'indiamart_lead_logs';
 const DIAGNOSTICS_KEY = 'indiamart_diagnostics';
 
 interface LogsPanelProps {
@@ -10,6 +11,7 @@ interface LogsPanelProps {
 
 export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
   const [summaries, setSummaries] = useState<string[]>([]);
+  const [leadLogs, setLeadLogs] = useState<string[]>([]);
   const [diagnostics, setDiagnostics] = useState<string>('');
   const [filter, setFilter] = useState<string>('');
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
@@ -21,11 +23,13 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
 
   const loadLogs = () => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
-    chrome.storage.local.get([SUMMARIES_KEY, DIAGNOSTICS_KEY], (result) => {
+    chrome.storage.local.get([SUMMARIES_KEY, LEAD_LOGS_KEY, DIAGNOSTICS_KEY], (result) => {
       const sums: string[] = Array.isArray(result[SUMMARIES_KEY]) ? result[SUMMARIES_KEY] : [];
+      const leadLogEntries: string[] = Array.isArray(result[LEAD_LOGS_KEY]) ? result[LEAD_LOGS_KEY] : [];
       const diag: string = result[DIAGNOSTICS_KEY] || '';
       if (!paused) {
         setSummaries(sums);
+        setLeadLogs(leadLogEntries);
         setDiagnostics(diag);
         setLastUpdated(Date.now());
       }
@@ -39,13 +43,22 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
     if (typeof chrome !== 'undefined' && chrome.storage?.onChanged) {
       const handleChange: Parameters<typeof chrome.storage.onChanged.addListener>[0] = (changes, areaName) => {
         if (areaName !== 'local' || paused) return;
+        let updated = false;
         if (changes[SUMMARIES_KEY]) {
           const sums: string[] = Array.isArray(changes[SUMMARIES_KEY].newValue) ? changes[SUMMARIES_KEY].newValue : [];
           setSummaries(sums);
-          setLastUpdated(Date.now());
+          updated = true;
+        }
+        if (changes[LEAD_LOGS_KEY]) {
+          const newLeadLogs: string[] = Array.isArray(changes[LEAD_LOGS_KEY].newValue) ? changes[LEAD_LOGS_KEY].newValue : [];
+          setLeadLogs(newLeadLogs);
+          updated = true;
         }
         if (changes[DIAGNOSTICS_KEY]) {
           setDiagnostics(changes[DIAGNOSTICS_KEY].newValue || '');
+          updated = true;
+        }
+        if (updated) {
           setLastUpdated(Date.now());
         }
       };
@@ -70,17 +83,20 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
     if (autoScroll && containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight;
     }
-  }, [summaries, diagnostics, showHistory, showDiagnostics, autoScroll]);
+  }, [summaries, leadLogs, diagnostics, showHistory, showDiagnostics, autoScroll]);
 
   const clearLogs = () => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
-    chrome.storage.local.set({ [SUMMARIES_KEY]: [], [DIAGNOSTICS_KEY]: '' }, () => loadLogs());
+    chrome.storage.local.set({ [SUMMARIES_KEY]: [], [LEAD_LOGS_KEY]: [], [DIAGNOSTICS_KEY]: '' }, () => loadLogs());
   };
 
   const exportLogs = () => {
     const body = [
       '=== Summaries ===',
       ...(summaries.length ? summaries : ['<none>']),
+      '',
+      '=== Lead Logs ===',
+      ...(leadLogs.length ? leadLogs : ['<none>']),
       '',
       '=== Diagnostics ===',
       diagnostics || '<none>'
@@ -95,13 +111,48 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
   };
 
   const latestSummary = summaries.length ? summaries[summaries.length - 1] : '';
-  const historySummaries = showHistory ? summaries.slice().reverse().join('\n\n') : latestSummary;
-  const mainText = React.useMemo(() => {
-    const source = showHistory ? historySummaries : latestSummary;
-    if (!filter.trim()) return source || 'No summaries yet.';
-    const lines = (source || '').split('\n');
-    return lines.filter((l) => l.toLowerCase().includes(filter.toLowerCase())).join('\n') || 'No match.';
-  }, [historySummaries, latestSummary, showHistory, filter]);
+  const historySummaries = showHistory ? summaries.slice().reverse() : summaries.slice(-1);
+  const historyLeadLogs = showHistory ? leadLogs.slice().reverse() : leadLogs.slice(-1);
+  const filteredSummaries = React.useMemo(() => {
+    const normalizedFilter = filter.trim().toLowerCase();
+    if (!normalizedFilter) return historySummaries;
+    return historySummaries
+      .map((entry) => {
+        const lines = entry.split('\n');
+        const matched = lines.filter((line) => line.toLowerCase().includes(normalizedFilter));
+        return matched.length ? matched.join('\n') : '';
+      })
+      .filter((entry) => entry);
+  }, [historySummaries, filter]);
+
+  const summaryText = filteredSummaries.length
+    ? filteredSummaries.join('\n\n==========\n\n')
+    : showHistory
+      ? 'No matching summaries.'
+      : (filter.trim() ? 'No match.' : 'No summaries yet.');
+
+  const filteredLeadText = React.useMemo(() => {
+    if (!historyLeadLogs.length) {
+      return filter.trim() ? 'No lead logs match the search.' : 'No lead logs yet.';
+    }
+
+    const normalizedFilter = filter.trim().toLowerCase();
+    const targetEntries = normalizedFilter
+      ? historyLeadLogs
+          .map((entry) => {
+            const lines = entry.split('\n');
+            const matched = lines.filter((line) => line.toLowerCase().includes(normalizedFilter));
+            return matched.length ? matched.join('\n') : '';
+          })
+          .filter((entry) => entry)
+      : historyLeadLogs;
+
+    if (!targetEntries.length) {
+      return normalizedFilter ? 'No lead logs match the search.' : 'No lead logs yet.';
+    }
+
+    return targetEntries.join('\n\n==========\n\n');
+  }, [historyLeadLogs, filter]);
 
   return (
     <div className="p-3 bg-slate-900 text-slate-200">
@@ -139,8 +190,21 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
           Show diagnostics
         </label>
       </div>
-      <div ref={containerRef} className="h-64 overflow-auto bg-slate-950 border border-slate-800 rounded p-2 text-[11px] whitespace-pre-wrap">
-        {showDiagnostics ? (diagnostics || 'No diagnostics.') : (mainText)}
+      <div ref={containerRef} className="h-64 overflow-auto bg-slate-950 border border-slate-800 rounded p-2 text-[11px] whitespace-pre-wrap space-y-4">
+        {showDiagnostics ? (
+          diagnostics || 'No diagnostics.'
+        ) : (
+          <>
+            <div>
+              <h4 className="text-xs font-semibold text-slate-300 mb-1 uppercase tracking-wide">Filtering Summary</h4>
+              <div>{summaryText}</div>
+            </div>
+            <div className="border-t border-slate-800 pt-2">
+              <h4 className="text-xs font-semibold text-slate-300 mb-1 uppercase tracking-wide">Filtered Lead Logs</h4>
+              <div>{filteredLeadText}</div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
