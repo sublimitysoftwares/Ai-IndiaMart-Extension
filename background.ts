@@ -5,7 +5,7 @@ import type { Lead } from './types';
 
 // Store auto-contact state
 let autoContactState = {
-  enabled: true,
+  enabled: false,
   stopped: false,
   processedLeads: new Set<string>(),
   lastContactTime: 0,
@@ -209,9 +209,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       agentActive = false;
       latestLeadsPayload = null;
       
-      // Setup alarm for periodic log processing
-      setupLogProcessingAlarm();
-      
       if (tabs.length > 0 && tabs[0].id) {
         // If tab exists, focus it and inject the script
         chrome.tabs.update(tabs[0].id, { active: true }, (tab) => {
@@ -240,6 +237,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true; // Indicates that the response is sent asynchronously
   } else if (message.type === 'ENABLE_AUTO_CONTACT') {
     autoContactState.enabled = true;
+    autoContactState.stopped = false;
     autoContactState.statistics.sessionStartTime = Date.now();
     
     // Setup alarm for periodic log processing
@@ -258,6 +256,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'DISABLE_AUTO_CONTACT') {
     autoContactState.enabled = false;
+    autoContactState.stopped = false;
     
     // Clear alarm when auto-contact is disabled
     clearLogProcessingAlarm();

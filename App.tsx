@@ -5,6 +5,7 @@ import React, { useState, useEffect } from 'react';
 import type { Lead } from './types';
 import { LeadCard } from './components/LeadCard';
 import { LogsPanel } from './components/LogsPanel';
+import { SuccessPanel } from './components/SuccessPanel';
 
 enum AppState {
   Idle,
@@ -26,7 +27,7 @@ const App: React.FC = () => {
   const [filteredLeads, setFilteredLeads] = useState<Lead[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [sortBy, setSortBy] = useState<'time' | 'company'>('time');
-  const [autoContactEnabled, setAutoContactEnabled] = useState(true);
+  const [autoContactEnabled, setAutoContactEnabled] = useState(false);
   const [agentStopped, setAgentStopped] = useState(false);
   const [autoContactStats, setAutoContactStats] = useState<AutoContactStats>({
     totalContacted: 0,
@@ -37,6 +38,7 @@ const App: React.FC = () => {
   const [agentInitialized, setAgentInitialized] = useState(false);
   const agentStoppedRef = React.useRef(false);
   const [showLogs, setShowLogs] = useState(false);
+  const [showSuccess, setShowSuccess] = useState(false);
 
   const sortedLeads = React.useMemo(() => {
     const arr = [...leads];
@@ -101,7 +103,7 @@ const App: React.FC = () => {
           setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
         } else {
           setAgentInitialized(false);
-          setAutoContactEnabled(response?.autoContactEnabled ?? true);
+          setAutoContactEnabled(response?.autoContactEnabled ?? false);
           setAppState(AppState.Idle);
         }
       });
@@ -215,12 +217,15 @@ const App: React.FC = () => {
           if (response && response.success) {
             setAgentStopped(false);
             agentStoppedRef.current = false;
+            setAutoContactEnabled(true);
+
+            chrome.runtime.sendMessage({ type: 'ENABLE_AUTO_CONTACT' });
+
             if (response.leadsPayload) {
               setLeads(response.leadsPayload.allLeads || []);
               setFilteredLeads(response.leadsPayload.filteredLeads || []);
-              setAutoContactEnabled(Boolean(response.autoContactEnabled));
               setAgentInitialized(true);
-              setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+              setAppState(AppState.AutoContact);
             } else if (!agentInitialized) {
               // Wait for content script to report back
               setAppState(AppState.Loading);
@@ -264,7 +269,19 @@ const App: React.FC = () => {
       setLeads([]);
       setFilteredLeads([]);
       setAppState(AppState.Idle);
-      chrome.runtime.sendMessage({ type: 'STOP_AGENT' });
+
+      chrome.runtime.sendMessage({ type: 'DISABLE_AUTO_CONTACT' }, () => {
+        const disableError = chrome.runtime.lastError;
+        if (disableError) {
+          console.warn('DISABLE_AUTO_CONTACT error:', disableError.message);
+        }
+        chrome.runtime.sendMessage({ type: 'STOP_AGENT' }, () => {
+          const stopError = chrome.runtime.lastError;
+          if (stopError) {
+            console.warn('STOP_AGENT error:', stopError.message);
+          }
+        });
+      });
     }
   };
 
@@ -359,7 +376,7 @@ const App: React.FC = () => {
                {showFilterDetails && (
                  <div className="mt-2 p-2 bg-slate-900/50 rounded text-xs space-y-1 text-slate-400">
                    <div>✓ Keywords: Uniform, Blazers, Jackets, etc.</div>
-                   <div>✓ Excluded: Delhi, Mumbai, Gurgaon, Ahmedabad, Surat, Thane</div>
+                  <div>✓ Location: Rejects foreign leads (USA, UK, UAE, Canada, Australia, Singapore, Malaysia)</div>
                    <div>✓ Quantity: ≥ 100 pieces</div>
                   <div>✓ Order Value: ≥ ₹10,000</div>
                    <div>✓ Categories: School/Corporate/Hospital Uniforms</div>
@@ -441,6 +458,12 @@ const App: React.FC = () => {
           >
             {showLogs ? 'Hide Logs' : 'Show Logs'}
           </button>
+          <button
+            onClick={() => setShowSuccess((v) => !v)}
+            className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded-md"
+          >
+            {showSuccess ? 'Hide Success' : 'Show Success'}
+          </button>
         </div>
       </header>
       <main>
@@ -448,6 +471,9 @@ const App: React.FC = () => {
           <div className="border-b border-slate-800">
             <LogsPanel onClose={() => setShowLogs(false)} />
           </div>
+        )}
+        {showSuccess && (
+          <SuccessPanel onClose={() => setShowSuccess(false)} />
         )}
         {renderContent()}
       </main>

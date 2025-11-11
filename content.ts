@@ -30,6 +30,20 @@ import type { Lead } from './types';
   const CONTACT_BUTTON_TEXT = 'Contact Buyer Now';
   const SEND_REPLY_TEXT = 'Send Reply';
   const SEND_REPLY_SELECTOR = '.btn-latest';
+  const SEND_REPLY_BUTTON_SELECTORS = [
+    '.btnCBNContainer .btnCBN1',
+    '.btnCBNContainer [onclick*="sendreply"]',
+    '.btnCBNContainer button[data-action*="send"]',
+    '.btnCBNContainer button[data-testid*="reply"]',
+    '[data-action="send-reply"]',
+    'button[id*="SendReply"]',
+    'button[class*="sendReply"]',
+    'button[aria-label*="send reply" i]',
+    'button[aria-label*="send message" i]',
+    '[role="button"][aria-label*="send reply" i]',
+    '[role="button"][aria-label*="send message" i]',
+    '.leadReplyBtn',
+  ];
   const SCRAPE_INTERVAL_MS = 1000;
   const SCRAPE_MAX_ATTEMPTS = 15;
   const REFRESH_INTERVAL = 30 * 1000; // 30 seconds
@@ -54,6 +68,34 @@ import type { Lead } from './types';
   let lastProcessingTime = Date.now();
   let isTabVisible = !document.hidden;
   let lastAutoScrollRun = 0;
+  let initialScrapeInterval: ReturnType<typeof setInterval> | null = null;
+
+  const stopAutomationTimers = (): void => {
+    if (pageRefreshTimer) {
+      clearTimeout(pageRefreshTimer);
+      pageRefreshTimer = null;
+    }
+    if (periodicProcessInterval) {
+      clearInterval(periodicProcessInterval);
+      periodicProcessInterval = null;
+    }
+    if (initialScrapeInterval) {
+      clearInterval(initialScrapeInterval);
+      initialScrapeInterval = null;
+    }
+  };
+
+  const resetAutomationState = ({ stopped = false }: { stopped?: boolean } = {}): void => {
+    stopAutomationTimers();
+    pendingContacts = [];
+    filteredLeadsCount = 0;
+    contactedLeadsCount = 0;
+    lastRefreshTime = 0;
+    lastContactTime = 0;
+    hasLoggedNoLeadCards = false;
+    isAutoContactEnabled = false;
+    isStopped = stopped;
+  };
 
   const syncAutoContactState = () => {
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
@@ -71,14 +113,15 @@ import type { Lead } from './types';
         isAutoContactEnabled = Boolean(response.autoContactEnabled);
         isStopped = Boolean(response.agentStopped);
 
-        if (!previousState && isAutoContactEnabled && !isStopped) {
-          console.log('Auto-contact restored from background state. Setting up periodic refresh and processing.');
+        if (isAutoContactEnabled && !isStopped) {
+          if (!previousState) {
+            console.log('Auto-contact restored from background state. Setting up periodic refresh and processing.');
+          }
+          startScrapeLoop();
           setupPeriodicProcessing();
           setupPeriodicRefresh();
-        } else if (isAutoContactEnabled && !isStopped) {
-          // If auto-contact is already enabled, set up periodic refresh and processing
-          setupPeriodicProcessing();
-          setupPeriodicRefresh();
+        } else {
+          resetAutomationState({ stopped: isStopped });
         }
       }
     });
@@ -280,7 +323,7 @@ import type { Lead } from './types';
     }
   };
 
-  const fillContactMessage = (message: string): boolean => {
+  const getVisibleMessageField = (): HTMLElement | null => {
     const contexts = getInteractionContexts();
     for (const ctx of contexts) {
       const candidates = [
@@ -307,10 +350,31 @@ import type { Lead } from './types';
           role === 'textbox';
 
         if (!looksLikeMessageField) continue;
-        setElementValue(element, message);
-        console.debug('[IndiaMART Agent] Filled contact message in visible input.');
-        return true;
+        return element;
       }
+    }
+    return null;
+  };
+
+  const getMessageFieldContent = (): string => {
+    const field = getVisibleMessageField();
+    if (!field) return '';
+
+    if ((field as HTMLTextAreaElement).value !== undefined) {
+      return (field as HTMLTextAreaElement).value || '';
+    }
+    if ((field as HTMLInputElement).value !== undefined) {
+      return (field as HTMLInputElement).value || '';
+    }
+    return field.textContent || '';
+  };
+
+  const fillContactMessage = (message: string): boolean => {
+    const field = getVisibleMessageField();
+    if (field) {
+      setElementValue(field, message);
+      console.debug('[IndiaMART Agent] Filled contact message in visible input.');
+      return true;
     }
     return false;
   };
@@ -322,6 +386,12 @@ import type { Lead } from './types';
       if (isElementVisible(selectorMatch)) {
         return selectorMatch;
       }
+      for (const selector of SEND_REPLY_BUTTON_SELECTORS) {
+        const candidate = ctx.querySelector<HTMLElement>(selector);
+        if (isElementVisible(candidate)) {
+          return candidate;
+        }
+      }
       const buttonMatch = findElementByText(ctx, 'button, a, div', SEND_REPLY_TEXT);
       if (isElementVisible(buttonMatch)) {
         return buttonMatch;
@@ -332,6 +402,74 @@ import type { Lead } from './types';
       }
     }
     return null;
+  };
+
+  const isSendReplyButtonVisible = (): boolean => {
+    const contexts = getInteractionContexts();
+    for (const ctx of contexts) {
+      for (const selector of SEND_REPLY_BUTTON_SELECTORS) {
+        const candidate = ctx.querySelector<HTMLElement>(selector);
+        if (isElementVisible(candidate)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
+  const detectSendReplySuccess = (): boolean => {
+    const successSelectors = [
+      '.toast-success',
+      '.alert-success',
+      '.success',
+      '.thankyou-msg',
+      '.submitted',
+      '.msg-sent',
+      '.message-sent',
+      '[data-testid="reply-success"]',
+    ];
+    const contexts = getInteractionContexts();
+    for (const ctx of contexts) {
+      for (const selector of successSelectors) {
+        const element = ctx.querySelector<HTMLElement>(selector);
+        if (isElementVisible(element)) {
+          return true;
+        }
+      }
+    }
+
+    if (!isSendReplyButtonVisible() && !getVisibleMessageField()) {
+      return true;
+    }
+
+    return false;
+  };
+
+  const waitForSendReplyConfirmation = async (timeoutMs = 6000): Promise<boolean> => {
+    const result = await waitForElement(() => (detectSendReplySuccess() ? document.body : null), timeoutMs, 250);
+    return Boolean(result);
+  };
+
+  const getSendReplyError = (): string | undefined => {
+    const selectors = [
+      '.error',
+      '.error-message',
+      '.validation-error',
+      '.field-error',
+      '[role="alert"]',
+      '.toast-error',
+      '.alert-danger',
+    ];
+    const contexts = getInteractionContexts();
+    for (const ctx of contexts) {
+      for (const selector of selectors) {
+        const element = ctx.querySelector<HTMLElement>(selector);
+        if (isElementVisible(element)) {
+          return sanitize(element.textContent);
+        }
+      }
+    }
+    return undefined;
   };
 
   const composeContactMessage = (lead?: Lead): string => {
@@ -676,6 +814,12 @@ import type { Lead } from './types';
   };
 
   const performContactFlow = async (cardIndex: number, lead?: Lead): Promise<{ success: boolean; error?: string }> => {
+    const shouldAbort = () => isStopped || !isAutoContactEnabled;
+    if (shouldAbort()) {
+      console.info('[IndiaMART Agent] Contact flow aborted before start (auto-contact disabled or agent stopped).');
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
     const cards = getLeadCardElements();
     const card = cards[cardIndex];
     if (!card) {
@@ -692,6 +836,12 @@ import type { Lead } from './types';
       const located = locateContactButton(card);
       return isElementVisible(located) ? located : null;
     }, 8000);
+
+    if (shouldAbort()) {
+      console.info('[IndiaMART Agent] Contact flow aborted after locating contact button (auto-contact disabled or agent stopped).');
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
     if (!contactButton) {
       console.warn('[IndiaMART Agent] Contact button could not be located for card index:', cardIndex, lead?.companyName);
       return { success: false, error: 'Contact Buyer Now button not found.' };
@@ -709,12 +859,26 @@ import type { Lead } from './types';
       if (!messageFilled) {
         messageFilled = fillContactMessage(desiredMessage);
       }
-      const inlineButton =
-        document.querySelector<HTMLElement>('.btnCBNContainer .btnCBN1, .btnCBNContainer [onclick*="sendreply"]') ||
-        document.querySelector<HTMLElement>('.leadReplyBtn, button[id*="SendReply"], button[class*="sendReply"]');
-      const fallbackButton = inlineButton || findSendReplyButton();
+
+      const contexts = getInteractionContexts();
+      for (const ctx of contexts) {
+        for (const selector of SEND_REPLY_BUTTON_SELECTORS) {
+          const candidate = ctx.querySelector<HTMLElement>(selector);
+          if (isElementVisible(candidate)) {
+            return candidate;
+          }
+        }
+      }
+
+      const fallbackButton = findSendReplyButton();
       return isElementVisible(fallbackButton) ? fallbackButton : null;
-    }, 15000);
+    }, 20000);
+
+    if (shouldAbort()) {
+      console.info('[IndiaMART Agent] Contact flow aborted before Send Reply (auto-contact disabled or agent stopped).');
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
     if (!replyButton) {
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
@@ -730,21 +894,67 @@ import type { Lead } from './types';
     // Ensure button is in view before clicking
     replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
     console.debug('[IndiaMART Agent] Clicking Send Reply button.');
+
+    if (shouldAbort()) {
+      console.info('[IndiaMART Agent] Contact flow aborted before clicking Send Reply (auto-contact disabled or agent stopped).');
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
     triggerRobustClick(replyButton);
 
     // Give the site a moment to register the submission
-    await delay(1500);
+    await delay(1200);
 
-    const successDetected = (() => {
-      const successSelectors = ['.toast-success', '.alert-success', '.success', '.thankyou-msg', '.submitted'];
-      return successSelectors.some((sel) => {
-        const el = document.querySelector<HTMLElement>(sel);
-        return isElementVisible(el);
+    let sendConfirmed = await waitForSendReplyConfirmation(6000);
+
+    if (shouldAbort()) {
+      console.info('[IndiaMART Agent] Contact flow aborted while waiting for confirmation (auto-contact disabled or agent stopped).');
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
+    if (!sendConfirmed) {
+      console.warn('[IndiaMART Agent] Send Reply confirmation not detected after first attempt; retrying click.');
+      const retryButton =
+        (replyButton.isConnected && isElementVisible(replyButton)) ?
+          replyButton :
+          await waitForElement(() => {
+            const candidate = findSendReplyButton();
+            return isElementVisible(candidate) ? candidate : null;
+          }, 5000);
+
+      if (retryButton) {
+        if (shouldAbort()) {
+          console.info('[IndiaMART Agent] Contact flow aborted before retrying Send Reply (auto-contact disabled or agent stopped).');
+          return { success: false, error: 'Auto-contact disabled.' };
+        }
+
+        triggerRobustClick(retryButton);
+        await delay(1500);
+        sendConfirmed = await waitForSendReplyConfirmation(6000);
+      } else {
+        console.warn('[IndiaMART Agent] Could not locate Send Reply button for retry attempt.');
+      }
+    }
+
+    if (shouldAbort()) {
+      console.info('[IndiaMART Agent] Contact flow aborted after retry (auto-contact disabled or agent stopped).');
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
+    if (!sendConfirmed) {
+      const messageContent = getMessageFieldContent();
+      const validationError = getSendReplyError();
+      console.error('[IndiaMART Agent] Send Reply confirmation not detected after retry.', {
+        replyButtonVisible: isSendReplyButtonVisible(),
+        messageLength: messageContent.trim().length,
+        validationError,
       });
-    })();
+      return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
+    }
 
-    if (!successDetected) {
-      console.debug('[IndiaMART Agent] No explicit success indicator detected after sending reply; continuing optimistically.');
+    const leadDetails = lead || (card ? extractLead(card, cardIndex) : undefined);
+    if (leadDetails) {
+      await recordContactSuccess(leadDetails);
     }
 
     return { success: true };
@@ -755,7 +965,7 @@ import type { Lead } from './types';
   const applyIntelligentFilter = (lead: Lead): { passed: boolean; reason: string; nextContactDelayMinutes: number } => {
     // Filter 1: Enquiry Title Keywords (inclusive match)
   const enquiryKeywords = [
-    'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'nurse uniform',
+    'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'school jackets', 'nurse uniform',
     'chef coats', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
     'kids school uniform', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
     'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety suits',
@@ -789,9 +999,10 @@ import type { Lead } from './types';
     
     // Filter 4: Category match (exact match)
     const allowedCategories = [
-      'kids school uniform', 'school uniforms', 'school blazers', 'school uniform fabric',
+      'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
       'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
-      'safety suits', 'boys school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform'
+    'safety suits', 'boys school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
+      'school jackets'
     ];
     const categoryLower = (lead.category || '').toLowerCase();
     const hasCategory = allowedCategories.some((keyword) => {
@@ -882,7 +1093,7 @@ import type { Lead } from './types';
 
   // Setup automatic refresh every 30 seconds when auto-contact is enabled
   const setupPeriodicRefresh = () => {
-    if (isStopped) {
+    if (isStopped || !isAutoContactEnabled) {
       return;
     }
     
@@ -895,7 +1106,7 @@ import type { Lead } from './types';
     // Schedule refresh in 30 seconds
     console.log('[IndiaMART Agent] Setting up periodic refresh - will refresh in 30 seconds');
     pageRefreshTimer = setTimeout(() => {
-      if (!isStopped) {
+      if (!isStopped && isAutoContactEnabled) {
         lastRefreshTime = Date.now();
         console.log('IndiaMART Agent: Periodic refresh - refreshing page now...');
         window.location.reload();
@@ -945,9 +1156,11 @@ import type { Lead } from './types';
   const SUMMARIES_KEY = 'indiamart_summaries'; // array of summary blocks
   const LEAD_LOGS_KEY = 'indiamart_lead_logs'; // array of detailed per-lead logs
   const DIAGNOSTICS_KEY = 'indiamart_diagnostics'; // diagnostics stream (optional)
+  const CONTACT_SUCCESS_KEY = 'indiamart_contact_successes'; // successful contact history
   const MAX_LOG_LINES = 1000; // Maximum number of diagnostic log lines to keep
   const MAX_SUMMARIES = 20; // keep last N summaries
   const MAX_LEAD_LOGS = 20; // keep last N detailed log blocks
+  const MAX_CONTACT_SUCCESS = 50; // keep last N successful contacts
   const DIAGNOSTICS_ENABLED = false; // default off
 
   const LAST_SIGNATURE_KEY = 'indiamart_last_signature';
@@ -957,6 +1170,62 @@ import type { Lead } from './types';
     passed: boolean;
     reason: string;
   }
+
+  interface ContactSuccessEntry {
+    leadId?: string;
+    companyName?: string;
+    enquiryTitle?: string;
+    location?: string;
+    contactedAt: string;
+    probableOrderValue?: string;
+  }
+
+  const formatOrderValueRange = (lead: Lead): string | undefined => {
+    if (lead.probableOrderValueRaw) return lead.probableOrderValueRaw;
+    const { probableOrderValueMin: min, probableOrderValueMax: max } = lead;
+    if (typeof min === 'number' && typeof max === 'number') {
+      if (min === max) return `₹${min.toLocaleString()}`;
+      return `₹${min.toLocaleString()} – ₹${max.toLocaleString()}`;
+    }
+    if (typeof min === 'number') return `₹${min.toLocaleString()}+`;
+    if (typeof max === 'number') return `Up to ₹${max.toLocaleString()}`;
+    return undefined;
+  };
+
+  const recordContactSuccess = async (lead: Lead): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return;
+    }
+
+    try {
+      const entry: ContactSuccessEntry = {
+        leadId: lead.leadId,
+        companyName: lead.companyName || undefined,
+        enquiryTitle: lead.enquiryTitle || lead.requirement || undefined,
+        location: lead.location || undefined,
+        contactedAt: new Date().toISOString(),
+        probableOrderValue: formatOrderValueRange(lead),
+      };
+
+      const result = await chrome.storage.local.get([CONTACT_SUCCESS_KEY]);
+      const existing: ContactSuccessEntry[] = Array.isArray(result[CONTACT_SUCCESS_KEY])
+        ? result[CONTACT_SUCCESS_KEY]
+        : [];
+
+      const withoutDuplicate = entry.leadId
+        ? existing.filter((item) => item.leadId !== entry.leadId)
+        : existing.slice();
+
+      const updated = [...withoutDuplicate, entry].slice(-MAX_CONTACT_SUCCESS);
+      await chrome.storage.local.set({ [CONTACT_SUCCESS_KEY]: updated });
+
+      if (chrome.runtime?.sendMessage) {
+        chrome.runtime.sendMessage({ type: 'CONTACT_SUCCESS_UPDATED', entry });
+      }
+    } catch (error) {
+      console.error('[IndiaMART Agent] Failed to record contact success:', error);
+    }
+  };
 
   const saveFilteringSummaryToStorage = async (
     totalLeads: number,
@@ -1077,7 +1346,7 @@ import type { Lead } from './types';
   };
 
   const processLeadsWithFiltering = async () => {
-    if (isStopped) return;
+    if (!isAutoContactEnabled || isStopped) return;
     
     // Update last processing time
     lastProcessingTime = Date.now();
@@ -1162,12 +1431,9 @@ import type { Lead } from './types';
       }
     } catch {}
     
-    // Always keep periodic refresh running while agent is active
-    if (!isStopped) {
-      setupPeriodicRefresh(); // Refresh page every 30 seconds
-    }
-    // Periodic processing still tied to auto-contact behaviour
+    // Only schedule refresh + periodic processing when auto-contact is active
     if (isAutoContactEnabled && !isStopped) {
+      setupPeriodicRefresh(); // Refresh page every 30 seconds while auto-contact runs
       setupPeriodicProcessing(); // Process and save logs every 30 seconds
     }
     
@@ -1278,8 +1544,10 @@ import type { Lead } from './types';
     }
     
     if (message.type === 'ENABLE_AUTO_CONTACT') {
-      isAutoContactEnabled = true;
       isStopped = false;
+      isAutoContactEnabled = true;
+      stopAutomationTimers();
+      startScrapeLoop();
       setupPeriodicProcessing(); // Set up periodic processing for logs
       setupPeriodicRefresh(); // Set up periodic refresh
       processLeadsWithFiltering();
@@ -1288,30 +1556,13 @@ import type { Lead } from './types';
     }
     
     if (message.type === 'DISABLE_AUTO_CONTACT') {
-      isAutoContactEnabled = false;
-      if (pageRefreshTimer) {
-        clearTimeout(pageRefreshTimer);
-        pageRefreshTimer = null;
-      }
-      if (periodicProcessInterval) {
-        clearInterval(periodicProcessInterval);
-        periodicProcessInterval = null;
-      }
+      resetAutomationState({ stopped: false });
       sendResponse({ success: true });
       return true;
     }
     
     if (message.type === 'STOP_AGENT') {
-      isStopped = true;
-      isAutoContactEnabled = false;
-      if (pageRefreshTimer) {
-        clearTimeout(pageRefreshTimer);
-        pageRefreshTimer = null;
-      }
-      if (periodicProcessInterval) {
-        clearInterval(periodicProcessInterval);
-        periodicProcessInterval = null;
-      }
+      resetAutomationState({ stopped: true });
       console.log('Agent stopped by user');
       sendResponse({ success: true });
       return true;
@@ -1340,20 +1591,35 @@ import type { Lead } from './types';
 
   // Initial scraping
   const startScrapeLoop = () => {
+    if (initialScrapeInterval || isStopped || !isAutoContactEnabled) {
+      return;
+    }
+
     let attempts = 0;
-    const interval = setInterval(() => {
+    initialScrapeInterval = setInterval(() => {
+      if (!isAutoContactEnabled || isStopped) {
+        stopAutomationTimers();
+        return;
+      }
+
       attempts += 1;
       ensureMinimumLeadCards(MIN_LEAD_TARGET)
         .catch((error) => console.warn('[IndiaMART Agent] Auto-scroll failed during initial scrape:', error))
         .finally(() => {
           const leads = scrapeLeads();
           if (leads.length > 0) {
-            clearInterval(interval);
+            if (initialScrapeInterval) {
+              clearInterval(initialScrapeInterval);
+              initialScrapeInterval = null;
+            }
             chrome.runtime.sendMessage({ type: 'LEADS_DATA', payload: leads });
             // Also run filtering
             processLeadsWithFiltering();
           } else if (attempts >= SCRAPE_MAX_ATTEMPTS) {
-            clearInterval(interval);
+            if (initialScrapeInterval) {
+              clearInterval(initialScrapeInterval);
+              initialScrapeInterval = null;
+            }
             chrome.runtime.sendMessage({
               type: 'SCRAPING_ERROR',
               error: 'Could not find any leads on the page. Please ensure they are visible.',
@@ -1364,5 +1630,4 @@ import type { Lead } from './types';
   };
   
   syncAutoContactState();
-  startScrapeLoop();
 })(); // End of IIFE

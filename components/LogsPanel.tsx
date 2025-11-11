@@ -4,6 +4,16 @@ import React, { useEffect, useRef, useState } from 'react';
 const SUMMARIES_KEY = 'indiamart_summaries';
 const LEAD_LOGS_KEY = 'indiamart_lead_logs';
 const DIAGNOSTICS_KEY = 'indiamart_diagnostics';
+const CONTACT_SUCCESS_KEY = 'indiamart_contact_successes';
+
+interface ContactSuccessEntry {
+  leadId?: string;
+  companyName?: string;
+  enquiryTitle?: string;
+  location?: string;
+  contactedAt: string;
+  probableOrderValue?: string;
+}
 
 interface LogsPanelProps {
   onClose?: () => void;
@@ -19,18 +29,21 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
   const [showHistory, setShowHistory] = useState<boolean>(false);
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [lastUpdated, setLastUpdated] = useState<number>(Date.now());
+  const [successes, setSuccesses] = useState<ContactSuccessEntry[]>([]);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const loadLogs = () => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
-    chrome.storage.local.get([SUMMARIES_KEY, LEAD_LOGS_KEY, DIAGNOSTICS_KEY], (result) => {
+    chrome.storage.local.get([SUMMARIES_KEY, LEAD_LOGS_KEY, DIAGNOSTICS_KEY, CONTACT_SUCCESS_KEY], (result) => {
       const sums: string[] = Array.isArray(result[SUMMARIES_KEY]) ? result[SUMMARIES_KEY] : [];
       const leadLogEntries: string[] = Array.isArray(result[LEAD_LOGS_KEY]) ? result[LEAD_LOGS_KEY] : [];
       const diag: string = result[DIAGNOSTICS_KEY] || '';
+      const successEntries: ContactSuccessEntry[] = Array.isArray(result[CONTACT_SUCCESS_KEY]) ? result[CONTACT_SUCCESS_KEY] : [];
       if (!paused) {
         setSummaries(sums);
         setLeadLogs(leadLogEntries);
         setDiagnostics(diag);
+        setSuccesses(successEntries);
         setLastUpdated(Date.now());
       }
     });
@@ -58,6 +71,13 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
           setDiagnostics(changes[DIAGNOSTICS_KEY].newValue || '');
           updated = true;
         }
+        if (changes[CONTACT_SUCCESS_KEY]) {
+          const newSuccesses: ContactSuccessEntry[] = Array.isArray(changes[CONTACT_SUCCESS_KEY].newValue)
+            ? changes[CONTACT_SUCCESS_KEY].newValue
+            : [];
+          setSuccesses(newSuccesses);
+          updated = true;
+        }
         if (updated) {
           setLastUpdated(Date.now());
         }
@@ -66,7 +86,7 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
 
       // Also listen for explicit LOGS_UPDATED broadcast
       const messageListener = (message: any) => {
-        if (message?.type === 'LOGS_UPDATED' && !paused) {
+        if (!paused && (message?.type === 'LOGS_UPDATED' || message?.type === 'CONTACT_SUCCESS_UPDATED')) {
           loadLogs();
         }
       };
@@ -154,6 +174,28 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
     return targetEntries.join('\n\n==========\n\n');
   }, [historyLeadLogs, filter]);
 
+  const filteredSuccesses = React.useMemo(() => {
+    if (!successes.length) return [];
+    const normalizedFilter = filter.trim().toLowerCase();
+    if (!normalizedFilter) return successes.slice().reverse();
+    return successes
+      .slice()
+      .reverse()
+      .filter((entry) => {
+        const haystack = [
+          entry.companyName,
+          entry.enquiryTitle,
+          entry.location,
+          entry.probableOrderValue,
+          entry.leadId,
+          entry.contactedAt,
+        ]
+          .join(' ')
+          .toLowerCase();
+        return haystack.includes(normalizedFilter);
+      });
+  }, [successes, filter]);
+
   return (
     <div className="p-3 bg-slate-900 text-slate-200">
       <div className="flex items-center justify-between mb-2">
@@ -196,12 +238,40 @@ export const LogsPanel: React.FC<LogsPanelProps> = ({ onClose }) => {
         ) : (
           <>
             <div>
-              <h4 className="text-xs font-semibold text-slate-300 mb-1 uppercase tracking-wide">Filtering Summary</h4>
-              <div>{summaryText}</div>
+              <h4 className="text-xs font-semibold text-slate-300 mb-1 uppercase tracking-wide">Successful Contacts</h4>
+              {filteredSuccesses.length ? (
+                <ul className="space-y-1">
+                  {filteredSuccesses.map((entry, index) => (
+                    <li key={`${entry.leadId || index}-${entry.contactedAt}`} className="flex flex-col border border-slate-800 rounded px-2 py-1 bg-slate-900/60">
+                      <span className="font-semibold text-slate-200">
+                        {entry.companyName || 'Unknown Company'}
+                      </span>
+                      <span className="text-slate-300">
+                        {entry.enquiryTitle || 'No enquiry title'}
+                      </span>
+                      <span className="text-slate-400 text-[10px] flex justify-between gap-2">
+                        <span>{entry.location || 'Location N/A'}</span>
+                        <span>{new Date(entry.contactedAt).toLocaleString()}</span>
+                      </span>
+                      {entry.probableOrderValue && (
+                        <span className="text-[10px] text-emerald-400">Order Value: {entry.probableOrderValue}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <div className="text-slate-500 text-[11px]">No successful contacts yet.</div>
+              )}
             </div>
-            <div className="border-t border-slate-800 pt-2">
-              <h4 className="text-xs font-semibold text-slate-300 mb-1 uppercase tracking-wide">Filtered Lead Logs</h4>
-              <div>{filteredLeadText}</div>
+            <div className="border-t border-slate-800 pt-2 space-y-2">
+              <div>
+                <h4 className="text-xs font-semibold text-slate-300 mb-1 uppercase tracking-wide">Filtering Summary</h4>
+                <div>{summaryText}</div>
+              </div>
+              <div className="border-t border-slate-800 pt-2">
+                <h4 className="text-xs font-semibold text-slate-300 mb-1 uppercase tracking-wide">Filtered Lead Logs</h4>
+                <div>{filteredLeadText}</div>
+              </div>
             </div>
           </>
         )}
