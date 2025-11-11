@@ -709,9 +709,12 @@ import type { Lead } from './types';
       if (!messageFilled) {
         messageFilled = fillContactMessage(desiredMessage);
       }
-      const button = findSendReplyButton();
-      return button;
-    }, 12000);
+      const inlineButton =
+        document.querySelector<HTMLElement>('.btnCBNContainer .btnCBN1, .btnCBNContainer [onclick*="sendreply"]') ||
+        document.querySelector<HTMLElement>('.leadReplyBtn, button[id*="SendReply"], button[class*="sendReply"]');
+      const fallbackButton = inlineButton || findSendReplyButton();
+      return isElementVisible(fallbackButton) ? fallbackButton : null;
+    }, 15000);
     if (!replyButton) {
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
@@ -727,7 +730,7 @@ import type { Lead } from './types';
     // Ensure button is in view before clicking
     replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
     console.debug('[IndiaMART Agent] Clicking Send Reply button.');
-    replyButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    triggerRobustClick(replyButton);
 
     // Give the site a moment to register the submission
     await delay(1500);
@@ -754,7 +757,7 @@ import type { Lead } from './types';
   const enquiryKeywords = [
     'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'nurse uniform',
     'chef coats', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
-    'kids school uniform', 'school uniforms', 'school blazers', 'school uniform fabric',
+    'kids school uniform', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
     'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety suits',
     'boys school uniform', 'surgical gown', 'hospital uniforms'
   ];
@@ -763,14 +766,9 @@ import type { Lead } from './types';
     if (!hasKeyword) return { passed: false, reason: 'No uniform keywords found', nextContactDelayMinutes: 0 };
     
     // Filter 2: Location exclusion
-    const excludedLocations = [
-      'delhi', 'mumbai', 'gurgaon', 'ahmedabad', 'surat', 'thane'
-    ];
     const locationLower = (lead.location || '').toLowerCase();
-    const isExcluded = excludedLocations.some(loc => locationLower.includes(loc));
-    if (isExcluded) return { passed: false, reason: 'Location is excluded', nextContactDelayMinutes: 0 };
     
-    // Check for foreign locations
+    // Check for foreign locations (reject if any foreign indicator is present)
     const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
     const isForeign = foreignIndicators.some(country => locationLower.includes(country));
     if (isForeign) return { passed: false, reason: 'Foreign location', nextContactDelayMinutes: 0 };
