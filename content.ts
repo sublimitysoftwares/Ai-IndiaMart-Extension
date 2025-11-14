@@ -69,6 +69,10 @@ import type { Lead } from './types';
   let isTabVisible = !document.hidden;
   let lastAutoScrollRun = 0;
   let initialScrapeInterval: ReturnType<typeof setInterval> | null = null;
+  let isLeadProcessingRunning = false;
+  let contactInFlight = false;
+  let zeroBalanceDetected = false;
+  let zeroBalanceObserver: MutationObserver | null = null;
 
   const stopAutomationTimers = (): void => {
     if (pageRefreshTimer) {
@@ -95,6 +99,8 @@ import type { Lead } from './types';
     hasLoggedNoLeadCards = false;
     isAutoContactEnabled = false;
     isStopped = stopped;
+    isLeadProcessingRunning = false;
+    contactInFlight = false;
   };
 
   const syncAutoContactState = () => {
@@ -262,6 +268,25 @@ import type { Lead } from './types';
     if (selector) {
       window.postMessage({ type: 'AI_CONTACT_BRIDGE_CLICK', selector }, '*');
     }
+  };
+
+  const clickWithFallback = (element: HTMLElement, label: string): void => {
+    console.debug(`[IndiaMART Agent] Triggering ${label} action via robust click.`);
+    try {
+      triggerRobustClick(element);
+    } catch (error) {
+      console.error(`[IndiaMART Agent] Robust click failed for ${label}:`, error);
+    }
+
+    setTimeout(() => {
+      if (!element.isConnected) return;
+      try {
+        element.click();
+        console.debug(`[IndiaMART Agent] Executed fallback click for ${label}.`);
+      } catch (error) {
+        console.warn(`[IndiaMART Agent] Fallback click failed for ${label}:`, error);
+      }
+    }, 200);
   };
 
   const locateContactButton = (card: Element): HTMLElement | null => {
@@ -523,6 +548,15 @@ import type { Lead } from './types';
     if (!value) return {};
     const raw = sanitize(value);
 
+    // Identify scale keywords (lakh/crore) to adjust numeric values
+    const lower = raw.toLowerCase();
+    let scale = 1;
+    if (/\b(crore|cr)\b/.test(lower)) {
+      scale = 10000000;
+    } else if (/\b(lakh|lac|lacs|l)\b/.test(lower)) {
+      scale = 100000;
+    }
+
     // Strip common currency prefixes so they don't interfere with parsing
     const withoutCurrency = raw.replace(/(?:rs\.?|inr|₹)/gi, ' ');
 
@@ -534,7 +568,7 @@ import type { Lead } from './types';
 
     const numbers = matches
       .map((token) => token.replace(/,/g, ''))
-      .map((token) => Number(token))
+      .map((token) => Number(token) * scale)
       .filter((num) => Number.isFinite(num));
 
     if (numbers.length === 0) {
@@ -618,6 +652,88 @@ import type { Lead } from './types';
 
   const delay = (ms: number): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, ms));
+
+  const withContactLock = async <T>(task: () => Promise<T>): Promise<T> => {
+    while (contactInFlight) {
+      await delay(200);
+    }
+    contactInFlight = true;
+    try {
+      return await task();
+    } finally {
+      contactInFlight = false;
+    }
+  };
+
+  const ZERO_BALANCE_REGEXES = [
+    /buylead\s+balance\s*:?\s*0/i,
+    /buy\s*lead\s*balance\s*:?\s*0/i,
+    /buy\s*leads\s*balance\s*:?\s*0/i,
+  ];
+
+  const detectZeroBalancePopup = (): boolean => {
+    if (!document.body || zeroBalanceDetected) {
+      return false;
+    }
+
+    try {
+      const bodyText = document.body.innerText?.toLowerCase() || '';
+      if (!bodyText) return false;
+      return ZERO_BALANCE_REGEXES.some((regex) => regex.test(bodyText));
+    } catch (error) {
+      console.warn('[IndiaMART Agent] Failed to scan for zero balance popup:', error);
+      return false;
+    }
+  };
+
+  const notifyZeroBalanceSuspension = () => {
+    try {
+      chrome.runtime.sendMessage({ type: 'BUY_LEAD_BALANCE_ZERO' });
+    } catch (error) {
+      console.error('[IndiaMART Agent] Failed to notify background about zero balance:', error);
+    }
+  };
+
+  const handleZeroBalanceDetected = () => {
+    if (zeroBalanceDetected) {
+      return;
+    }
+
+    zeroBalanceDetected = true;
+    if (zeroBalanceObserver) {
+      zeroBalanceObserver.disconnect();
+      zeroBalanceObserver = null;
+    }
+
+    console.warn('[IndiaMART Agent] Detected BuyLead balance 0 popup. Pausing automation until midnight.');
+    resetAutomationState({ stopped: true });
+    notifyZeroBalanceSuspension();
+  };
+
+  const startZeroBalanceObserver = () => {
+    if (zeroBalanceObserver) {
+      zeroBalanceObserver.disconnect();
+    }
+
+    if (detectZeroBalancePopup()) {
+      handleZeroBalanceDetected();
+      return;
+    }
+
+    zeroBalanceObserver = new MutationObserver(() => {
+      if (zeroBalanceDetected) {
+        return;
+      }
+
+      if (detectZeroBalancePopup()) {
+        handleZeroBalanceDetected();
+      }
+    });
+
+    if (document.body) {
+      zeroBalanceObserver.observe(document.body, { childList: true, subtree: true });
+    }
+  };
 
   const attemptClickLoadMore = (): boolean => {
     const selectors = [
@@ -847,8 +963,9 @@ import type { Lead } from './types';
       return { success: false, error: 'Contact Buyer Now button not found.' };
     }
 
+    console.debug('[IndiaMART Agent] Contact button located, preparing to submit contact flow.');
     console.debug('[IndiaMART Agent] Clicking Contact Buyer button for lead:', lead?.companyName || cardIndex);
-    triggerRobustClick(contactButton);
+    clickWithFallback(contactButton, 'Contact Buyer');
     console.info('[IndiaMART Agent] Clicked Contact Buyer button for lead:', lead?.companyName || cardIndex);
 
     // Attempt to fill the message while the form loads
@@ -900,7 +1017,7 @@ import type { Lead } from './types';
       return { success: false, error: 'Auto-contact disabled.' };
     }
 
-    triggerRobustClick(replyButton);
+    clickWithFallback(replyButton, 'Send Reply');
 
     // Give the site a moment to register the submission
     await delay(1200);
@@ -928,7 +1045,8 @@ import type { Lead } from './types';
           return { success: false, error: 'Auto-contact disabled.' };
         }
 
-        triggerRobustClick(retryButton);
+        console.debug('[IndiaMART Agent] Retrying Send Reply with fallback click support.');
+        clickWithFallback(retryButton, 'Send Reply Retry');
         await delay(1500);
         sendConfirmed = await waitForSendReplyConfirmation(6000);
       } else {
@@ -962,8 +1080,6 @@ import type { Lead } from './types';
 
   // Removed duplicate startScrapeLoop - defined later in the file
 
-  const applyIntelligentFilter = (lead: Lead): { passed: boolean; reason: string; nextContactDelayMinutes: number } => {
-    // Filter 1: Enquiry Title Keywords (inclusive match)
   const enquiryKeywords = [
     'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'school jackets', 'nurse uniform',
     'chef coats', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
@@ -971,6 +1087,26 @@ import type { Lead } from './types';
     'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety suits',
     'boys school uniform', 'surgical gown', 'hospital uniforms'
   ];
+  const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
+  const quantityThreshold = { min: 100, unit: 'piece' };
+  const allowedCategories = [
+    'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
+    'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
+    'safety suits', 'boys school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
+    'school jackets'
+  ];
+  const orderValueMin = 50000;
+
+  const getFilterCriteria = () => ({
+    keywords: enquiryKeywords,
+    foreignIndicators,
+    quantity: quantityThreshold,
+    orderValueMin,
+    categories: allowedCategories,
+  });
+
+  const applyIntelligentFilter = (lead: Lead): { passed: boolean; reason: string; nextContactDelayMinutes: number } => {
+    // Filter 1: Enquiry Title Keywords (inclusive match)
     const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
     const hasKeyword = enquiryKeywords.some(keyword => titleLower.includes(keyword));
     if (!hasKeyword) return { passed: false, reason: 'No uniform keywords found', nextContactDelayMinutes: 0 };
@@ -979,31 +1115,24 @@ import type { Lead } from './types';
     const locationLower = (lead.location || '').toLowerCase();
     
     // Check for foreign locations (reject if any foreign indicator is present)
-    const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
     const isForeign = foreignIndicators.some(country => locationLower.includes(country));
     if (isForeign) return { passed: false, reason: 'Foreign location', nextContactDelayMinutes: 0 };
     
     // Filter 3: Quantity > 100
     const quantityUnitOk =
       typeof lead.quantity === 'number' &&
-      lead.quantity >= 100 &&
+      lead.quantity >= quantityThreshold.min &&
       typeof lead.quantityRaw === 'string' &&
-      lead.quantityRaw.toLowerCase().includes('piece');
+      lead.quantityRaw.toLowerCase().includes(quantityThreshold.unit);
     if (!quantityUnitOk) {
       return {
         passed: false,
-        reason: 'Quantity must be ≥ 100 Piece',
+        reason: `Quantity must be ≥ ${quantityThreshold.min} ${quantityThreshold.unit.charAt(0).toUpperCase()}${quantityThreshold.unit.slice(1)}`,
         nextContactDelayMinutes: 0
       };
     }
     
     // Filter 4: Category match (exact match)
-    const allowedCategories = [
-      'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
-      'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
-    'safety suits', 'boys school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
-      'school jackets'
-    ];
     const categoryLower = (lead.category || '').toLowerCase();
     const hasCategory = allowedCategories.some((keyword) => {
       const normalized = keyword.toLowerCase();
@@ -1015,8 +1144,8 @@ import type { Lead } from './types';
     
     // Filter 5: Probable Order Value ≥ ₹10,000
     const orderValue = lead.probableOrderValueMin || lead.probableOrderValueMax || 0;
-    if (orderValue < 10000) {
-      return { passed: false, reason: 'Order value < ₹10,000', nextContactDelayMinutes: 0 };
+    if (orderValue < orderValueMin) {
+      return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
     }
     
     // Generate random delay between 1-10 minutes for qualified leads
@@ -1080,11 +1209,10 @@ import type { Lead } from './types';
     // Process leads every 30 seconds to ensure logs are saved regularly
     console.log('[IndiaMART Agent] Setting up periodic processing - will process and save logs every 30 seconds');
     periodicProcessInterval = setInterval(() => {
-      if (!isStopped && isAutoContactEnabled && !document.hidden) {
-        // Only process when tab is visible
+      if (!isStopped && isAutoContactEnabled) {
         const timeSinceLastProcessing = Date.now() - lastProcessingTime;
         if (timeSinceLastProcessing >= REFRESH_INTERVAL - 5000) { // Process if 25+ seconds have passed
-          console.log('[IndiaMART Agent] Periodic processing - processing leads and saving logs...');
+          console.log('[IndiaMART Agent] Periodic processing - processing leads and saving logs (runs regardless of tab visibility)...');
           processLeadsWithFiltering();
         }
       }
@@ -1117,37 +1245,40 @@ import type { Lead } from './types';
   const processFilteredLead = async (lead: Lead, cardIndex: number): Promise<boolean> => {
     if (!isAutoContactEnabled || isStopped) return false;
     
-    try {
-      const result = await performContactFlow(cardIndex, lead);
-      if (result.success) {
-        processedLeads.add(lead.leadId);
-        lastContactTime = Date.now();
-        contactedLeadsCount++;
-        
-        chrome.runtime.sendMessage({
-          type: 'AUTO_CONTACT_SUCCESS',
-          leadId: lead.leadId,
-          companyName: lead.companyName,
-          timestamp: new Date().toISOString(),
-          contactedCount: contactedLeadsCount,
-          totalFiltered: filteredLeadsCount
-        });
-        
-        console.log(`Contacted: ${lead.companyName} (${contactedLeadsCount}/${filteredLeadsCount})`);
-        
-        // Check if all filtered leads have been contacted
-        if (contactedLeadsCount >= filteredLeadsCount && isAutoContactEnabled && !isStopped) {
-          console.log('All filtered leads contacted. Periodic refresh will handle page refresh.');
-          // Don't trigger immediate refresh - let periodic refresh handle it in 30 seconds
+    return withContactLock(async () => {
+      try {
+        const result = await performContactFlow(cardIndex, lead);
+        if (result.success) {
+          processedLeads.add(lead.leadId);
+          lastContactTime = Date.now();
+          contactedLeadsCount++;
+          
+          chrome.runtime.sendMessage({
+            type: 'AUTO_CONTACT_SUCCESS',
+            leadId: lead.leadId,
+            companyName: lead.companyName,
+            timestamp: new Date().toISOString(),
+            contactedCount: contactedLeadsCount,
+            totalFiltered: filteredLeadsCount,
+            tabHidden: document.hidden
+          });
+          
+          console.log(`Contacted: ${lead.companyName} (${contactedLeadsCount}/${filteredLeadsCount})`);
+          
+          // Check if all filtered leads have been contacted
+          if (contactedLeadsCount >= filteredLeadsCount && isAutoContactEnabled && !isStopped) {
+            console.log('All filtered leads contacted. Periodic refresh will handle page refresh.');
+            // Don't trigger immediate refresh - let periodic refresh handle it in 30 seconds
+          }
+          
+          return true;
         }
-        
-        return true;
+      } catch (error) {
+        console.error('Error contacting lead:', error);
       }
-    } catch (error) {
-      console.error('Error contacting lead:', error);
-    }
-    
-    return false;
+      
+      return false;
+    });
   };
 
   // Storage helper functions and keys
@@ -1346,111 +1477,130 @@ import type { Lead } from './types';
   };
 
   const processLeadsWithFiltering = async () => {
-    if (!isAutoContactEnabled || isStopped) return;
+    if (!isAutoContactEnabled || isStopped) {
+      lastProcessingTime = Date.now();
+      return;
+    }
     
-    // Update last processing time
+    if (isLeadProcessingRunning) {
+      lastProcessingTime = Date.now();
+      console.debug('[IndiaMART Agent] Skipping processLeadsWithFiltering - already running.');
+      return;
+    }
+    
+    isLeadProcessingRunning = true;
     lastProcessingTime = Date.now();
     
-    await ensureMinimumLeadCards(MIN_LEAD_TARGET);
-    const leads = scrapeLeads();
-    const filteredLeads: Lead[] = [];
-    const leadEvaluations: LeadEvaluation[] = [];
-    
-    // Reset counters for this batch
-    filteredLeadsCount = 0;
-    contactedLeadsCount = 0;
-    pendingContacts = [];
-    
-    console.log('[IndiaMART Agent] Processing leads with filtering...');
-    console.log('[IndiaMART Agent] Total leads to process:', leads.length);
-    
-    // Apply filtering
-    for (const lead of leads) {
-      if (processedLeads.has(lead.leadId)) {
-        console.log(`[IndiaMART Agent] Skipping already processed lead: ${lead.companyName}`);
-        continue; // Skip already processed
-      }
-      
-      const filterResult = applyIntelligentFilter(lead);
-      lead.passedFilter = filterResult.passed;
-      lead.filterReason = filterResult.reason;
-      lead.nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
-      leadEvaluations.push({ lead, passed: filterResult.passed, reason: filterResult.reason });
-      
-      console.log(`[IndiaMART Agent] Lead: ${lead.companyName}`);
-      console.log(`  - Filter passed: ${filterResult.passed}`);
-      console.log(`  - Reason: ${filterResult.reason}`);
-      console.log(`  - Details:`, {
-        enquiryTitle: lead.enquiryTitle,
-        location: lead.location,
-        quantity: lead.quantity,
-        category: lead.category,
-        orderValue: `₹${lead.probableOrderValueMin || 0} - ₹${lead.probableOrderValueMax || 0}`
-      });
-      
-      if (filterResult.passed) {
-        filteredLeads.push(lead);
-        pendingContacts.push(lead);
-        filteredLeadsCount++;
-      }
-    }
-    
-    // Send filtered data to popup
-    chrome.runtime.sendMessage({
-      type: 'FILTERED_LEADS_DATA',
-      payload: {
-        allLeads: leads,
-        filteredLeads: filteredLeads,
-        autoContactEnabled: isAutoContactEnabled
-      }
-    });
-    
-    console.log('[IndiaMART Agent] ========== FILTERING SUMMARY ==========');
-    console.log(`[IndiaMART Agent] Total leads: ${leads.length}`);
-    console.log(`[IndiaMART Agent] Filtered (qualified) leads: ${filteredLeadsCount}`);
-    console.log(`[IndiaMART Agent] Rejected leads: ${leads.length - filteredLeadsCount}`);
-    console.log('[IndiaMART Agent] Filtered leads list:', filteredLeads.map(l => ({
-      company: l.companyName,
-      enquiry: l.enquiryTitle,
-      location: l.location
-    })));
-    
-    // Save filtering summary to Chrome storage
-    await saveFilteringSummaryToStorage(
-      leads.length,
-      filteredLeadsCount,
-      leads.length - filteredLeadsCount,
-      filteredLeads,
-      leadEvaluations
-    );
-    
-    // Notify popup/background that logs were updated
     try {
-      if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage({ type: 'LOGS_UPDATED' });
+      await ensureMinimumLeadCards(MIN_LEAD_TARGET);
+      const leads = scrapeLeads();
+      const filteredLeads: Lead[] = [];
+      const leadEvaluations: LeadEvaluation[] = [];
+      const contactsToProcess: Lead[] = [];
+      
+      // Reset counters for this batch
+      filteredLeadsCount = 0;
+      contactedLeadsCount = 0;
+      pendingContacts = [];
+      
+      console.log('[IndiaMART Agent] Processing leads with filtering...');
+      console.log('[IndiaMART Agent] Total leads to process:', leads.length);
+      
+      // Apply filtering
+      for (const lead of leads) {
+        if (processedLeads.has(lead.leadId)) {
+          console.log(`[IndiaMART Agent] Skipping already processed lead: ${lead.companyName}`);
+          continue; // Skip already processed
+        }
+        
+        const filterResult = applyIntelligentFilter(lead);
+        lead.passedFilter = filterResult.passed;
+        lead.filterReason = filterResult.reason;
+        lead.nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
+        leadEvaluations.push({ lead, passed: filterResult.passed, reason: filterResult.reason });
+        
+        console.log(`[IndiaMART Agent] Lead: ${lead.companyName}`);
+        console.log(`  - Filter passed: ${filterResult.passed}`);
+        console.log(`  - Reason: ${filterResult.reason}`);
+        console.log(`  - Details:`, {
+          enquiryTitle: lead.enquiryTitle,
+          location: lead.location,
+          quantity: lead.quantity,
+          category: lead.category,
+          orderValue: `₹${lead.probableOrderValueMin || 0} - ₹${lead.probableOrderValueMax || 0}`
+        });
+        
+        if (filterResult.passed) {
+          filteredLeads.push(lead);
+          contactsToProcess.push(lead);
+          pendingContacts.push(lead);
+          filteredLeadsCount++;
+        }
       }
-    } catch {}
-    
-    // Only schedule refresh + periodic processing when auto-contact is active
-    if (isAutoContactEnabled && !isStopped) {
-      setupPeriodicRefresh(); // Refresh page every 30 seconds while auto-contact runs
-      setupPeriodicProcessing(); // Process and save logs every 30 seconds
-    }
-    
-    // Decide on refresh strategy for specific cases
-    if (filteredLeadsCount === 0) {
-      if (isAutoContactEnabled && !isStopped) {
-        console.log('No filtered leads found. Periodic refresh already scheduled.');
-      } else {
-        console.log('No filtered leads found. Auto-contact disabled, no refresh scheduled.');
-      }
-    } else if (isAutoContactEnabled && !isStopped) {
-      // Contact qualified leads immediately
-      pendingContacts.forEach((lead) => {
-        if (!isStopped && isAutoContactEnabled) {
-          void processFilteredLead(lead, lead.cardIndex || 0);
+      
+      // Send filtered data to popup
+      chrome.runtime.sendMessage({
+        type: 'FILTERED_LEADS_DATA',
+        payload: {
+          allLeads: leads,
+          filteredLeads: filteredLeads,
+        autoContactEnabled: isAutoContactEnabled,
+        filters: getFilterCriteria()
         }
       });
+      
+      console.log('[IndiaMART Agent] ========== FILTERING SUMMARY ==========');
+      console.log(`[IndiaMART Agent] Total leads: ${leads.length}`);
+      console.log(`[IndiaMART Agent] Filtered (qualified) leads: ${filteredLeadsCount}`);
+      console.log(`[IndiaMART Agent] Rejected leads: ${leads.length - filteredLeadsCount}`);
+      console.log('[IndiaMART Agent] Filtered leads list:', filteredLeads.map(l => ({
+        company: l.companyName,
+        enquiry: l.enquiryTitle,
+        location: l.location
+      })));
+      
+      // Save filtering summary to Chrome storage
+      await saveFilteringSummaryToStorage(
+        leads.length,
+        filteredLeadsCount,
+        leads.length - filteredLeadsCount,
+        filteredLeads,
+        leadEvaluations
+      );
+      
+      // Notify popup/background that logs were updated
+      try {
+        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
+          chrome.runtime.sendMessage({ type: 'LOGS_UPDATED' });
+        }
+      } catch {}
+      
+      // Only schedule refresh + periodic processing when auto-contact is active
+      if (isAutoContactEnabled && !isStopped) {
+        setupPeriodicRefresh(); // Refresh page every 30 seconds while auto-contact runs
+        setupPeriodicProcessing(); // Process and save logs every 30 seconds
+      }
+      
+      // Decide on refresh strategy for specific cases
+      if (filteredLeadsCount === 0) {
+        if (isAutoContactEnabled && !isStopped) {
+          console.log('No filtered leads found. Periodic refresh already scheduled.');
+        } else {
+          console.log('No filtered leads found. Auto-contact disabled, no refresh scheduled.');
+        }
+      } else if (isAutoContactEnabled && !isStopped) {
+        for (const lead of contactsToProcess) {
+          if (isStopped || !isAutoContactEnabled) {
+            break;
+          }
+          const contacted = await processFilteredLead(lead, lead.cardIndex || 0);
+          if (contacted && typeof lead.nextContactDelayMinutes === 'number' && lead.nextContactDelayMinutes > 0) {
+            await delay(lead.nextContactDelayMinutes * 60 * 1000);
+          }
+        }
+      }
+    } finally {
+      isLeadProcessingRunning = false;
     }
   };
 
@@ -1472,7 +1622,7 @@ import type { Lead } from './types';
       if (DIAGNOSTICS_ENABLED && typeof chrome !== 'undefined' && chrome.storage?.local) {
         chrome.storage.local.get(DIAGNOSTICS_KEY, (result) => {
           const existingDiag: string = result[DIAGNOSTICS_KEY] || '';
-          const inactiveLog = `\n[${timestamp}] [Content Script] ⚠️ Tab hidden: background checks continue; page scraping paused. Will scrape again when visible.\n`;
+          const inactiveLog = `\n[${timestamp}] [Content Script] ⚠️ Tab hidden: automation continues in background; Chrome may throttle activity while hidden.\n`;
           const combined = existingDiag + inactiveLog;
           const lines = combined.split('\n');
           const trimmed = lines.slice(-MAX_LOG_LINES).join('\n');
@@ -1493,7 +1643,7 @@ import type { Lead } from './types';
       if (DIAGNOSTICS_ENABLED && typeof chrome !== 'undefined' && chrome.storage?.local) {
         chrome.storage.local.get(DIAGNOSTICS_KEY, (result) => {
           const existingDiag: string = result[DIAGNOSTICS_KEY] || '';
-          const resumeLog = `\n[${timestamp}] [Content Script] ✅ Tab visible: resuming page scraping after ${minutesInactive}m ${secondsInactive}s.\n`;
+          const resumeLog = `\n[${timestamp}] [Content Script] ✅ Tab visible: continuing automation after ${minutesInactive}m ${secondsInactive}s.\n`;
           const combined = existingDiag + resumeLog;
           const lines = combined.split('\n');
           const trimmed = lines.slice(-MAX_LOG_LINES).join('\n');
@@ -1551,6 +1701,8 @@ import type { Lead } from './types';
       setupPeriodicProcessing(); // Set up periodic processing for logs
       setupPeriodicRefresh(); // Set up periodic refresh
       processLeadsWithFiltering();
+      zeroBalanceDetected = false;
+      startZeroBalanceObserver();
       sendResponse({ success: true });
       return true;
     }
@@ -1613,6 +1765,7 @@ import type { Lead } from './types';
               initialScrapeInterval = null;
             }
             chrome.runtime.sendMessage({ type: 'LEADS_DATA', payload: leads });
+            chrome.runtime.sendMessage({ type: 'FILTER_CRITERIA_UPDATE', payload: getFilterCriteria() });
             // Also run filtering
             processLeadsWithFiltering();
           } else if (attempts >= SCRAPE_MAX_ATTEMPTS) {
@@ -1629,5 +1782,6 @@ import type { Lead } from './types';
     }, SCRAPE_INTERVAL_MS);
   };
   
+  startZeroBalanceObserver();
   syncAutoContactState();
 })(); // End of IIFE

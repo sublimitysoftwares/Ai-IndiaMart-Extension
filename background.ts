@@ -24,6 +24,16 @@ const DIAGNOSTICS_KEY = 'indiamart_diagnostics';
 const MAX_LOG_LINES = 1000;
 const DIAGNOSTICS_ENABLED = false; // default off for main logs cleanliness
 let lastInactivityNotify = 0;
+const BUY_LEAD_SUSPENSION_KEY = 'indiamart_buylead_suspension';
+const RESUME_ALARM_NAME = 'resumeAutoContact';
+
+type SuspensionState = {
+  active: boolean;
+  resumeAt?: number;
+  restoreAutoContact?: boolean;
+};
+
+let suspensionState: SuspensionState = { active: false };
 
 const setBadge = (text: string, title: string, color: string) => {
   try {
@@ -106,6 +116,133 @@ const clearLogProcessingAlarm = () => {
   }
 };
 
+const calculateNextMidnight = (): number => {
+  const now = new Date();
+  const next = new Date(now);
+  next.setDate(now.getDate() + 1);
+  next.setHours(0, 0, 0, 0);
+  return next.getTime();
+};
+
+const scheduleResumeAlarm = (resumeAt: number) => {
+  chrome.alarms.clear(RESUME_ALARM_NAME);
+  chrome.alarms.create(RESUME_ALARM_NAME, { when: resumeAt });
+  console.log(`[Background] Scheduled resume alarm for ${new Date(resumeAt).toLocaleString()}`);
+};
+
+const persistSuspensionState = async () => {
+  try {
+    await chrome.storage.local.set({ [BUY_LEAD_SUSPENSION_KEY]: suspensionState });
+  } catch (error) {
+    console.error('[Background] Failed to persist suspension state:', error);
+  }
+};
+
+const clearSuspensionState = async () => {
+  suspensionState = { active: false };
+  try {
+    await chrome.storage.local.remove(BUY_LEAD_SUSPENSION_KEY);
+  } catch (error) {
+    console.error('[Background] Failed to clear suspension state:', error);
+  }
+};
+
+const suspendAutomationForZeroBalance = async () => {
+  const resumeAt = calculateNextMidnight();
+  const restoreAutoContact = autoContactState.enabled && !autoContactState.stopped;
+
+  if (suspensionState.active) {
+    suspensionState.resumeAt = resumeAt;
+    suspensionState.restoreAutoContact = suspensionState.restoreAutoContact || restoreAutoContact;
+    await persistSuspensionState();
+    scheduleResumeAlarm(resumeAt);
+    return;
+  }
+
+  suspensionState = {
+    active: true,
+    resumeAt,
+    restoreAutoContact,
+  };
+
+  autoContactState.enabled = false;
+  autoContactState.stopped = true;
+  agentActive = false;
+  latestLeadsPayload = null;
+  clearLogProcessingAlarm();
+  setBadge('PA', 'BuyLead balance 0 - paused', '#f97316');
+
+  await persistSuspensionState();
+  scheduleResumeAlarm(resumeAt);
+
+  chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
+    tabs.forEach((tab) => {
+      if (tab.id) {
+        chrome.tabs.sendMessage(tab.id, { type: 'STOP_AGENT' });
+      }
+    });
+  });
+
+  sendMessageSafe({ type: 'BUY_LEAD_BALANCE_SUSPENDED', resumeAt });
+  notify('indiamart-buylead-suspended', 'IndiaMART Agent paused', 'BuyLead balance is zero. Automation will resume at midnight.');
+  console.warn('[Background] Automation suspended due to zero BuyLead balance until midnight.');
+};
+
+const resumeAutomationFromSuspension = async () => {
+  if (!suspensionState.active) {
+    return;
+  }
+
+  const shouldRestore = Boolean(suspensionState.restoreAutoContact);
+  await clearSuspensionState();
+  chrome.alarms.clear(RESUME_ALARM_NAME);
+  setBadge('', 'IndiaMART Agent', '#0ea5e9');
+
+  if (shouldRestore) {
+    autoContactState.enabled = true;
+    autoContactState.stopped = false;
+    autoContactState.statistics.sessionStartTime = Date.now();
+    setupLogProcessingAlarm();
+
+    chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
+      tabs.forEach((tab) => {
+        if (tab.id) {
+          chrome.tabs.sendMessage(tab.id, { type: 'ENABLE_AUTO_CONTACT' });
+        }
+      });
+    });
+
+    sendMessageSafe({ type: 'BUY_LEAD_BALANCE_RESUMED', restored: true });
+    notify('indiamart-buylead-resumed', 'IndiaMART Agent resumed', 'Automation restarted after BuyLead balance suspension.');
+    console.log('[Background] Automation resumed automatically after zero balance suspension.');
+  } else {
+    sendMessageSafe({ type: 'BUY_LEAD_BALANCE_RESUMED', restored: false });
+    notify('indiamart-buylead-resumed', 'IndiaMART Agent ready', 'BuyLead balance suspension ended. Automation remains paused.');
+  }
+};
+
+const initializeSuspensionState = async () => {
+  try {
+    const stored = (await chrome.storage.local.get(BUY_LEAD_SUSPENSION_KEY))[BUY_LEAD_SUSPENSION_KEY] as SuspensionState | undefined;
+    if (!stored || !stored.active) {
+      return;
+    }
+
+    suspensionState = stored;
+    const resumeAt = stored.resumeAt || calculateNextMidnight();
+
+    if (resumeAt <= Date.now()) {
+      await resumeAutomationFromSuspension();
+    } else {
+      scheduleResumeAlarm(resumeAt);
+      setBadge('PA', 'BuyLead balance 0 - paused', '#f97316');
+      console.warn('[Background] Suspension state restored. Automation paused until resume alarm fires.');
+    }
+  } catch (error) {
+    console.error('[Background] Failed to initialize suspension state:', error);
+  }
+};
+
 // Listen for alarm events (Heartbeat - keeps service worker alive)
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === 'processLeadsForLogs') {
@@ -128,23 +265,25 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
         let activeTabFound = false;
         tabs.forEach(tab => {
-          if (tab.id && tab.active) {
+          if (!tab.id) return;
+
+          if (tab.active) {
             activeTabFound = true;
-            // Try to communicate with active tab
-            chrome.tabs.sendMessage(tab.id, { type: 'PROCESS_LEADS_FOR_LOGS' }, (response) => {
-              if (chrome.runtime.lastError) {
-                // Tab might be inactive or content script not ready
-                const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
-                if (timeSinceLastLog > 60000) { // Only log if more than 1 minute
-                  saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
-                }
-                console.debug('[Background] Could not send PROCESS_LEADS_FOR_LOGS:', chrome.runtime.lastError.message);
-              } else {
-                // Successfully communicated - content will emit LOGS_UPDATED if something actually changed
-                lastSuccessfulLogTime = Date.now();
-              }
-            });
           }
+
+          chrome.tabs.sendMessage(tab.id, { type: 'PROCESS_LEADS_FOR_LOGS' }, () => {
+            if (chrome.runtime.lastError) {
+              // Tab might be inactive, throttled, or content script not ready
+              const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
+              if (timeSinceLastLog > 60000) { // Only log if more than 1 minute
+                saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
+              }
+              console.debug('[Background] Could not send PROCESS_LEADS_FOR_LOGS:', chrome.runtime.lastError.message);
+            } else {
+              // Successfully communicated - content will emit LOGS_UPDATED if something actually changed
+              lastSuccessfulLogTime = Date.now();
+            }
+          });
         });
 
         // If no active tab found, check if we should log inactivity
@@ -161,6 +300,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
         }
       });
     }
+  } else if (alarm.name === RESUME_ALARM_NAME) {
+    void resumeAutomationFromSuspension();
   }
 });
 
@@ -182,6 +323,8 @@ const sendMessageSafe = (message: unknown) => {
     }
   }
 };
+
+void initializeSuspensionState();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'START_AGENT') {
@@ -275,12 +418,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'GET_AUTO_CONTACT_STATE') {
     sendResponse(autoContactState);
     return true;
+  } else if (message.type === 'BUY_LEAD_BALANCE_ZERO') {
+    suspendAutomationForZeroBalance()
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => {
+        console.error('[Background] Failed to suspend automation:', error);
+        sendResponse({ success: false, error: (error as Error)?.message });
+      });
+    return true;
   } else if (message.type === 'AUTO_CONTACT_SUCCESS') {
     // Update statistics
     autoContactState.processedLeads.add(message.leadId);
     autoContactState.lastContactTime = Date.now();
     autoContactState.statistics.totalContacted = message.contactedCount || autoContactState.statistics.totalContacted + 1;
     autoContactState.statistics.totalFiltered = message.totalFiltered || autoContactState.statistics.totalFiltered;
+    const tabHidden = Boolean(message.tabHidden);
     
     // Notify popup if open
     sendMessageSafe({
@@ -290,6 +442,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       timestamp: message.timestamp,
       statistics: autoContactState.statistics
     });
+    
+    if (tabHidden) {
+      const notificationId = `indiamart-success-${message.leadId || Date.now()}`;
+      const company = message.companyName ? `Contacted ${message.companyName}` : 'Reply sent successfully.';
+      void notify(notificationId, 'IndiaMART Agent: Successful Contact', company);
+    }
     return true;
   } else if (message.type === 'STOP_AGENT') {
     autoContactState.enabled = false;

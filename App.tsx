@@ -21,6 +21,14 @@ interface AutoContactStats {
   sessionStartTime: number;
 }
 
+interface FilterCriteria {
+  keywords?: string[];
+  foreignIndicators?: string[];
+  quantity?: { min?: number; unit?: string };
+  orderValueMin?: number;
+  categories?: string[];
+}
+
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.Idle);
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -39,6 +47,7 @@ const App: React.FC = () => {
   const agentStoppedRef = React.useRef(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [filterCriteria, setFilterCriteria] = useState<FilterCriteria | null>(null);
 
   const sortedLeads = React.useMemo(() => {
     const arr = [...leads];
@@ -82,6 +91,9 @@ const App: React.FC = () => {
           setLeads(response.leadsPayload.allLeads || []);
           setFilteredLeads(response.leadsPayload.filteredLeads || []);
           setAutoContactEnabled(Boolean(response.autoContactEnabled));
+          if (response.leadsPayload?.filters) {
+            setFilterCriteria(response.leadsPayload.filters);
+          }
           setAutoContactStats((prev) => {
             const newFilteredLeads = response.leadsPayload?.filteredLeads;
             const filteredCount = Array.isArray(newFilteredLeads)
@@ -131,7 +143,9 @@ const App: React.FC = () => {
           if (message.payload) {
             setLeads(message.payload.allLeads || []);
             setFilteredLeads(message.payload.filteredLeads || []);
-            setAppState(autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+            const autoContactFlag = Boolean(message.payload.autoContactEnabled ?? autoContactEnabled);
+            setAutoContactEnabled(autoContactFlag);
+            setAppState(autoContactFlag ? AppState.AutoContact : AppState.LeadsScraped);
             setAgentInitialized(true);
             setAgentStopped(false);
             agentStoppedRef.current = false;
@@ -145,6 +159,13 @@ const App: React.FC = () => {
                 totalFiltered: filteredCount
               };
             });
+            if (message.payload.filters) {
+              setFilterCriteria(message.payload.filters);
+            }
+          }
+        } else if (message.type === 'FILTER_CRITERIA_UPDATE') {
+          if (message.payload) {
+            setFilterCriteria(message.payload);
           }
         } else if (message.type === 'AUTO_CONTACT_UPDATE') {
           if (!agentStoppedRef.current) {
@@ -375,11 +396,44 @@ const App: React.FC = () => {
                
                {showFilterDetails && (
                  <div className="mt-2 p-2 bg-slate-900/50 rounded text-xs space-y-1 text-slate-400">
-                   <div>✓ Keywords: Uniform, Blazers, Jackets, etc.</div>
-                  <div>✓ Location: Rejects foreign leads (USA, UK, UAE, Canada, Australia, Singapore, Malaysia)</div>
-                   <div>✓ Quantity: ≥ 100 pieces</div>
-                  <div>✓ Order Value: ≥ ₹10,000</div>
-                   <div>✓ Categories: School/Corporate/Hospital Uniforms</div>
+                  {filterCriteria ? (
+                    <>
+                      {filterCriteria.keywords && filterCriteria.keywords.length > 0 && (
+                        <div>
+                          ✓ Keywords: {filterCriteria.keywords.slice(0, 6).join(', ')}
+                          {filterCriteria.keywords.length > 6 ? ', …' : ''}
+                        </div>
+                      )}
+                      {filterCriteria.foreignIndicators && filterCriteria.foreignIndicators.length > 0 && (
+                        <div>
+                          ✓ Location: Rejects foreign leads ({filterCriteria.foreignIndicators.map((item) =>
+                            item.toUpperCase()
+                          ).join(', ')})
+                        </div>
+                      )}
+                      {filterCriteria.quantity && typeof filterCriteria.quantity.min === 'number' && (
+                        <div>
+                          ✓ Quantity: ≥ {filterCriteria.quantity.min}{' '}
+                          {filterCriteria.quantity.unit ? `${filterCriteria.quantity.unit}s` : ''}
+                        </div>
+                      )}
+                      {typeof filterCriteria.orderValueMin === 'number' && (
+                        <div>✓ Order Value: ≥ ₹{filterCriteria.orderValueMin.toLocaleString()}</div>
+                      )}
+                      {filterCriteria.categories && filterCriteria.categories.length > 0 && (
+                        <div>✓ Categories: {filterCriteria.categories.join(', ')}</div>
+                      )}
+                      {!filterCriteria.keywords &&
+                        !filterCriteria.foreignIndicators &&
+                        !filterCriteria.quantity &&
+                        typeof filterCriteria.orderValueMin !== 'number' &&
+                        !filterCriteria.categories && (
+                          <div className="italic text-slate-500">No active filters.</div>
+                        )}
+                    </>
+                  ) : (
+                    <div className="italic text-slate-500">No filter information received yet.</div>
+                  )}
                  </div>
                )}
                
