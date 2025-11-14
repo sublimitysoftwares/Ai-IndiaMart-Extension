@@ -47,7 +47,18 @@ const App: React.FC = () => {
   const agentStoppedRef = React.useRef(false);
   const [showLogs, setShowLogs] = useState(false);
   const [showSuccess, setShowSuccess] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [filterCriteria, setFilterCriteria] = useState<FilterCriteria | null>(null);
+  
+  // Settings state
+  const [keywords, setKeywords] = useState<string[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [newKeyword, setNewKeyword] = useState('');
+  const [newCategory, setNewCategory] = useState('');
+  const [quantityMin, setQuantityMin] = useState<string>('100');
+  const [quantityUnit, setQuantityUnit] = useState<string>('piece');
+  const [orderValue, setOrderValue] = useState<string>('50000');
+  const [settingsMessage, setSettingsMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   const sortedLeads = React.useMemo(() => {
     const arr = [...leads];
@@ -306,6 +317,332 @@ const App: React.FC = () => {
     }
   };
 
+  // Load filter config from storage
+  const loadFilterConfig = async () => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
+
+      try {
+        const result = await chrome.storage.local.get([
+          'indiamart_filter_keywords', 
+          'indiamart_filter_categories',
+          'indiamart_filter_quantity',
+          'indiamart_filter_order_value'
+        ]);
+        
+        if (Array.isArray(result.indiamart_filter_keywords) && result.indiamart_filter_keywords.length > 0) {
+          setKeywords(result.indiamart_filter_keywords);
+        } else {
+          // Use defaults if not in storage
+          setKeywords(filterCriteria?.keywords || []);
+        }
+
+        if (Array.isArray(result.indiamart_filter_categories) && result.indiamart_filter_categories.length > 0) {
+          setCategories(result.indiamart_filter_categories);
+        } else {
+          // Use defaults if not in storage
+          setCategories(filterCriteria?.categories || []);
+        }
+
+        // Load quantity threshold
+        if (result.indiamart_filter_quantity && typeof result.indiamart_filter_quantity === 'object') {
+          const qty = result.indiamart_filter_quantity;
+          if (typeof qty.min === 'number') setQuantityMin(String(qty.min));
+          if (typeof qty.unit === 'string') setQuantityUnit(qty.unit);
+        } else if (filterCriteria?.quantity) {
+          setQuantityMin(String(filterCriteria.quantity.min || 100));
+          setQuantityUnit(filterCriteria.quantity.unit || 'piece');
+        }
+
+        // Load order value minimum
+        if (typeof result.indiamart_filter_order_value === 'number') {
+          setOrderValue(String(result.indiamart_filter_order_value));
+        } else if (typeof filterCriteria?.orderValueMin === 'number') {
+          setOrderValue(String(filterCriteria.orderValueMin));
+        }
+      } catch (error) {
+        console.error('Error loading filter config:', error);
+      }
+  };
+
+  // Save filter config to storage and notify content script
+  const saveFilterConfig = async (
+    newKeywords?: string[], 
+    newCategories?: string[],
+    newQuantity?: { min: number; unit: string },
+    newOrderValue?: number
+  ) => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) return false;
+
+    try {
+      const toSave: Record<string, any> = {};
+
+      if (newKeywords !== undefined) {
+        const validated = newKeywords
+          .filter(k => k.trim().length > 0 && k.trim().length <= 100)
+          .map(k => k.trim())
+          .slice(0, 500);
+        toSave['indiamart_filter_keywords'] = validated;
+        setKeywords(validated);
+      }
+
+      if (newCategories !== undefined) {
+        const validated = newCategories
+          .filter(c => c.trim().length > 0 && c.trim().length <= 100)
+          .map(c => c.trim())
+          .slice(0, 500);
+        toSave['indiamart_filter_categories'] = validated;
+        setCategories(validated);
+      }
+
+        // Save quantity threshold
+        if (newQuantity !== undefined) {
+          const validated = {
+            min: Math.max(1, Math.min(newQuantity.min, 1000000)),
+            unit: (newQuantity.unit || 'piece').trim().toLowerCase()
+          };
+          toSave['indiamart_filter_quantity'] = validated;
+          setQuantityMin(String(validated.min));
+          setQuantityUnit(validated.unit);
+        }
+
+        // Save order value minimum
+        if (newOrderValue !== undefined) {
+          const validated = Math.max(0, Math.min(newOrderValue, 100000000));
+          toSave['indiamart_filter_order_value'] = validated;
+          setOrderValue(String(validated));
+        }
+
+      if (Object.keys(toSave).length > 0) {
+        await chrome.storage.local.set(toSave);
+        console.log('[Popup] Filter config saved to storage:', toSave);
+        
+        // Small delay to ensure storage is committed before notifying content script
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Notify content script to reload
+        chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
+          if (tabs.length === 0) {
+            console.warn('[Popup] No IndiaMART tabs found to notify');
+            return;
+          }
+          
+          tabs.forEach(tab => {
+            if (tab.id) {
+              chrome.tabs.sendMessage(tab.id, { type: 'FILTER_KEYWORDS_UPDATED' }, (response) => {
+                if (chrome.runtime.lastError) {
+                  console.warn('[Popup] Failed to notify tab', tab.id, ':', chrome.runtime.lastError.message);
+                } else {
+                  console.log('[Popup] Successfully notified tab', tab.id, 'about filter update');
+                }
+              });
+            }
+          });
+        });
+
+        setSettingsMessage({ type: 'success', text: 'Filter settings saved successfully!' });
+        setTimeout(() => setSettingsMessage(null), 3000);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('Error saving filter config:', error);
+      setSettingsMessage({ type: 'error', text: 'Failed to save filter settings.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+      return false;
+    }
+  };
+
+  // Add keyword
+  const handleAddKeyword = () => {
+    if (!newKeyword.trim() || newKeyword.trim().length > 100) {
+      setSettingsMessage({ type: 'error', text: 'Keyword must be between 1-100 characters.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+      return;
+    }
+
+    const trimmed = newKeyword.trim().toLowerCase();
+    if (keywords.includes(trimmed)) {
+      setSettingsMessage({ type: 'error', text: 'Keyword already exists.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+      return;
+    }
+
+    const updated = [...keywords, trimmed];
+    saveFilterConfig(updated, undefined);
+    setNewKeyword('');
+  };
+
+  // Remove keyword
+  const handleRemoveKeyword = (keyword: string) => {
+    const updated = keywords.filter(k => k !== keyword);
+    saveFilterConfig(updated, undefined);
+  };
+
+  // Add category
+  const handleAddCategory = () => {
+    if (!newCategory.trim() || newCategory.trim().length > 100) {
+      setSettingsMessage({ type: 'error', text: 'Category must be between 1-100 characters.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+      return;
+    }
+
+    const trimmed = newCategory.trim().toLowerCase();
+    if (categories.includes(trimmed)) {
+      setSettingsMessage({ type: 'error', text: 'Category already exists.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+      return;
+    }
+
+    const updated = [...categories, trimmed];
+    saveFilterConfig(undefined, updated);
+    setNewCategory('');
+  };
+
+  // Remove category
+  const handleRemoveCategory = (category: string) => {
+    const updated = categories.filter(c => c !== category);
+    saveFilterConfig(undefined, updated);
+  };
+
+  // Update quantity
+  const handleUpdateQuantity = async () => {
+    const numValue = parseInt(quantityMin.trim(), 10);
+    if (isNaN(numValue) || numValue < 1 || numValue > 1000000) {
+      setSettingsMessage({ type: 'error', text: 'Quantity must be between 1 and 1,000,000.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+      // Reset to last valid value
+      setQuantityMin('100');
+      return;
+    }
+    const unitTrimmed = quantityUnit.trim().toLowerCase() || 'piece';
+    try {
+      const success = await saveFilterConfig(undefined, undefined, { min: numValue, unit: unitTrimmed }, undefined);
+      if (!success) {
+        setSettingsMessage({ type: 'error', text: 'Failed to save quantity threshold.' });
+        setTimeout(() => setSettingsMessage(null), 3000);
+      }
+    } catch (error) {
+      console.error('Error updating quantity:', error);
+      setSettingsMessage({ type: 'error', text: 'Error saving quantity threshold.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+    }
+  };
+
+  // Update order value
+  const handleUpdateOrderValue = async () => {
+    const numValue = parseInt(orderValue.trim(), 10);
+    if (isNaN(numValue) || numValue < 0 || numValue > 100000000) {
+      setSettingsMessage({ type: 'error', text: 'Order value must be between ₹0 and ₹100,000,000.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+      // Reset to last valid value
+      setOrderValue('50000');
+      return;
+    }
+    try {
+      const success = await saveFilterConfig(undefined, undefined, undefined, numValue);
+      if (!success) {
+        setSettingsMessage({ type: 'error', text: 'Failed to save order value threshold.' });
+        setTimeout(() => setSettingsMessage(null), 3000);
+      }
+    } catch (error) {
+      console.error('Error updating order value:', error);
+      setSettingsMessage({ type: 'error', text: 'Error saving order value threshold.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+    }
+  };
+
+  // Export filter config as JSON
+  const handleExportConfig = () => {
+    const config = {
+      keywords: keywords,
+      categories: categories,
+      quantity: { min: parseInt(quantityMin) || 100, unit: quantityUnit },
+      orderValue: parseInt(orderValue) || 50000,
+      version: '1.0',
+      updated: new Date().toISOString()
+    };
+
+    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `indiamart-filter-config-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    setSettingsMessage({ type: 'success', text: 'Configuration exported successfully!' });
+    setTimeout(() => setSettingsMessage(null), 3000);
+  };
+
+  // Import filter config from JSON file
+  const handleImportConfig = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const text = await file.text();
+      const config = JSON.parse(text);
+
+      if (typeof config !== 'object' || config === null) {
+        throw new Error('Invalid file format');
+      }
+
+      const importedKeywords: string[] = Array.isArray(config.keywords)
+        ? config.keywords.filter((k: any) => typeof k === 'string' && k.trim().length > 0 && k.trim().length <= 100).slice(0, 500)
+        : [];
+      
+      const importedCategories: string[] = Array.isArray(config.categories)
+        ? config.categories.filter((c: any) => typeof c === 'string' && c.trim().length > 0 && c.trim().length <= 100).slice(0, 500)
+        : [];
+
+      const importedQuantity: { min: number; unit: string } | undefined = 
+        config.quantity && typeof config.quantity === 'object' && typeof config.quantity.min === 'number' && typeof config.quantity.unit === 'string'
+          ? { 
+              min: Math.max(1, Math.min(config.quantity.min, 1000000)), 
+              unit: config.quantity.unit.trim().toLowerCase() || 'piece' 
+            }
+          : undefined;
+
+      const importedOrderValue: number | undefined = 
+        typeof config.orderValue === 'number' && config.orderValue >= 0 && config.orderValue <= 100000000
+          ? Math.max(0, Math.min(config.orderValue, 100000000))
+          : undefined;
+
+      if (importedKeywords.length === 0 && importedCategories.length === 0 && importedQuantity === undefined && importedOrderValue === undefined) {
+        setSettingsMessage({ type: 'error', text: 'No valid keywords, categories, quantity, or order value found in file.' });
+        setTimeout(() => setSettingsMessage(null), 3000);
+        return;
+      }
+
+      await saveFilterConfig(
+        importedKeywords.length > 0 ? importedKeywords : keywords,
+        importedCategories.length > 0 ? importedCategories : categories,
+        importedQuantity,
+        importedOrderValue
+      );
+
+      setSettingsMessage({ type: 'success', text: 'Configuration imported successfully!' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+    } catch (error) {
+      console.error('Error importing config:', error);
+      setSettingsMessage({ type: 'error', text: 'Failed to import configuration. Please check file format.' });
+      setTimeout(() => setSettingsMessage(null), 3000);
+    }
+
+    // Reset file input
+    event.target.value = '';
+  };
+
+  // Load config when settings panel opens
+  useEffect(() => {
+    if (showSettings) {
+      loadFilterConfig();
+    }
+  }, [showSettings, filterCriteria]);
+
   useEffect(() => {
     agentStoppedRef.current = agentStopped;
   }, [agentStopped]);
@@ -518,6 +855,12 @@ const App: React.FC = () => {
           >
             {showSuccess ? 'Hide Success' : 'Show Success'}
           </button>
+          <button
+            onClick={() => setShowSettings((v) => !v)}
+            className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-700 text-white rounded-md"
+          >
+            {showSettings ? 'Hide Settings' : 'Settings'}
+          </button>
         </div>
       </header>
       <main>
@@ -528,6 +871,192 @@ const App: React.FC = () => {
         )}
         {showSuccess && (
           <SuccessPanel onClose={() => setShowSuccess(false)} />
+        )}
+        {showSettings && (
+          <div className="border-b border-slate-800 p-4 bg-slate-900 max-h-[500px] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-slate-200">Filter Settings</h2>
+              <button
+                onClick={() => setShowSettings(false)}
+                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded"
+              >
+                ✕
+              </button>
+            </div>
+
+            {settingsMessage && (
+              <div className={`mb-4 p-2 rounded text-xs ${
+                settingsMessage.type === 'success' 
+                  ? 'bg-green-900/30 text-green-400' 
+                  : 'bg-red-900/30 text-red-400'
+              }`}>
+                {settingsMessage.text}
+              </div>
+            )}
+
+            {/* Keywords Section */}
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">Keywords</h3>
+              <div className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={newKeyword}
+                  onChange={(e) => setNewKeyword(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleAddKeyword()}
+                  placeholder="Add keyword (e.g., DAV School Blazers)"
+                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  maxLength={100}
+                />
+                <button
+                  onClick={handleAddKeyword}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
+                >
+                  Add
+                </button>
+              </div>
+              <div className="max-h-32 overflow-y-auto bg-slate-800 rounded p-2 space-y-1">
+                {keywords.length === 0 ? (
+                  <p className="text-xs text-slate-500">No keywords. Add one above.</p>
+                ) : (
+                  keywords.map((keyword, idx) => (
+                    <div key={idx} className="flex items-center justify-between bg-slate-700/50 rounded px-2 py-1 text-xs">
+                      <span className="text-slate-300">{keyword}</span>
+                      <button
+                        onClick={() => handleRemoveKeyword(keyword)}
+                        className="text-red-400 hover:text-red-300 ml-2"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Categories Section */}
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">Categories</h3>
+              <div className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={newCategory}
+                  onChange={(e) => setNewCategory(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleAddCategory()}
+                  placeholder="Add category"
+                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  maxLength={100}
+                />
+                <button
+                  onClick={handleAddCategory}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
+                >
+                  Add
+                </button>
+              </div>
+              <div className="max-h-32 overflow-y-auto bg-slate-800 rounded p-2 space-y-1">
+                {categories.length === 0 ? (
+                  <p className="text-xs text-slate-500">No categories. Add one above.</p>
+                ) : (
+                  categories.map((category, idx) => (
+                    <div key={idx} className="flex items-center justify-between bg-slate-700/50 rounded px-2 py-1 text-xs">
+                      <span className="text-slate-300">{category}</span>
+                      <button
+                        onClick={() => handleRemoveCategory(category)}
+                        className="text-red-400 hover:text-red-300 ml-2"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Quantity Threshold Section */}
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">Quantity Threshold</h3>
+              <div className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={quantityMin}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    // Allow empty or numeric values only
+                    if (value === '' || /^\d+$/.test(value)) {
+                      setQuantityMin(value);
+                    }
+                  }}
+                  onKeyPress={(e) => e.key === 'Enter' && handleUpdateQuantity()}
+                  onBlur={handleUpdateQuantity}
+                  placeholder="Minimum quantity"
+                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <input
+                  type="text"
+                  value={quantityUnit}
+                  onChange={(e) => setQuantityUnit(e.target.value)}
+                  onKeyPress={(e) => e.key === 'Enter' && handleUpdateQuantity()}
+                  placeholder="Unit (e.g., piece)"
+                  className="w-28 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={handleUpdateQuantity}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
+                >
+                  Update
+                </button>
+              </div>
+              <p className="text-xs text-slate-500">Current: ≥ {parseInt(quantityMin) || 0} {quantityUnit}</p>
+            </div>
+
+            {/* Order Value Threshold Section */}
+            <div className="mb-6">
+              <h3 className="text-sm font-semibold text-slate-300 mb-2">Order Value Threshold</h3>
+              <div className="flex gap-2 mb-2">
+                <input
+                  type="text"
+                  value={orderValue}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    // Allow empty or numeric values only
+                    if (value === '' || /^\d+$/.test(value)) {
+                      setOrderValue(value);
+                    }
+                  }}
+                  onKeyPress={(e) => e.key === 'Enter' && handleUpdateOrderValue()}
+                  onBlur={handleUpdateOrderValue}
+                  placeholder="Minimum order value (₹)"
+                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  onClick={handleUpdateOrderValue}
+                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
+                >
+                  Update
+                </button>
+              </div>
+              <p className="text-xs text-slate-500">Current: ≥ ₹{(parseInt(orderValue) || 0).toLocaleString()}</p>
+            </div>
+
+            {/* Import/Export Section */}
+            <div className="flex gap-2">
+              <label className="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm text-center cursor-pointer">
+                Import JSON
+                <input
+                  type="file"
+                  accept=".json"
+                  onChange={handleImportConfig}
+                  className="hidden"
+                />
+              </label>
+              <button
+                onClick={handleExportConfig}
+                className="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm"
+              >
+                Export JSON
+              </button>
+            </div>
+          </div>
         )}
         {renderContent()}
       </main>

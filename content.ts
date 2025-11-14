@@ -52,6 +52,7 @@ import type { Lead } from './types';
   const AUTO_SCROLL_DELAY_MS = 1200;
   const AUTO_SCROLL_COOLDOWN_MS = 60 * 1000;
   const DEFAULT_CONTACT_MESSAGE = `Hello,\n\nWe supply premium-quality uniforms and would love to support your requirement. Please let us know the sizes and timelines so we can share the best quote.\n\nThanks,\nTeam IndiaMART Agent`;
+  const SKIPPED_LEADS_KEY = 'indiamart_skipped_leads'; // Storage key for skipped lead IDs
   
   // State management
   let isAutoContactEnabled = false;
@@ -73,6 +74,8 @@ import type { Lead } from './types';
   let contactInFlight = false;
   let zeroBalanceDetected = false;
   let zeroBalanceObserver: MutationObserver | null = null;
+  let filterConfigLoaded = false; // Track if filter config has been loaded from storage
+  let skippedLeads = new Set<string>(); // In-memory set of skipped lead IDs for fast lookups
 
   const stopAutomationTimers = (): void => {
     if (pageRefreshTimer) {
@@ -170,45 +173,44 @@ import type { Lead } from './types';
     if (bridgeInstalled) return;
     bridgeInstalled = true;
 
-    const script = document.createElement('script');
-    script.id = 'ai-contact-click-bridge';
-    script.textContent = `
-      (() => {
-        if (window.__aiContactBridgeInstalled) return;
-        window.__aiContactBridgeInstalled = true;
+    // Add message listener directly in content script context (no inline script injection to avoid CSP violation)
+    // Content scripts already run in the page context, so we can listen directly
+    window.addEventListener('message', (event) => {
+      // Only handle messages from the same window (our own postMessage calls)
+      if (event.source !== window) return;
+      
+      const data = event.data;
+      if (!data || data.type !== 'AI_CONTACT_BRIDGE_CLICK') return;
 
-        window.addEventListener('message', (event) => {
-          if (!event || event.source !== window) return;
-          const data = event.data;
-          if (!data || data.type !== 'AI_CONTACT_BRIDGE_CLICK') return;
+      const selector = data.selector;
+      if (!selector) return;
 
-          const selector = data.selector;
-          if (!selector) return;
+      const element = document.querySelector(selector);
+      if (!element) return;
 
-          const element = document.querySelector(selector);
-          if (!element) return;
-
-          try {
-            const mouseInit = { bubbles: true, cancelable: true };
-            const inline = element.getAttribute('onclick');
-            if (inline) {
-              const handler = new Function('event', inline);
-              handler.call(element, new MouseEvent('click', mouseInit));
-              return;
-            }
-            if (typeof element.onclick === 'function') {
-              element.onclick.call(element, new MouseEvent('click', mouseInit));
-              return;
-            }
-            element.dispatchEvent(new MouseEvent('click', mouseInit));
-          } catch (error) {
-            console.error('[AI Contact Bridge] Failed to execute click handler:', error);
-          }
-        }, false);
-      })();
-    `;
-    (document.head || document.documentElement).appendChild(script);
-    script.remove();
+      try {
+        const mouseInit: MouseEventInit = { bubbles: true, cancelable: true, view: window };
+        
+        // Try native click method first (most reliable and CSP-safe)
+        if (typeof (element as HTMLElement).click === 'function') {
+          (element as HTMLElement).click();
+          return;
+        }
+        
+        // Fallback: dispatch mouse events for elements that don't support .click()
+        element.dispatchEvent(new MouseEvent('mousedown', mouseInit));
+        element.dispatchEvent(new MouseEvent('mouseup', mouseInit));
+        element.dispatchEvent(new MouseEvent('click', mouseInit));
+        
+        // If element has onclick property that's a function, try calling it
+        // Avoid executing inline onclick strings to prevent CSP issues
+        if (typeof (element as any).onclick === 'function') {
+          (element as any).onclick.call(element, new MouseEvent('click', mouseInit));
+        }
+      } catch (error) {
+        console.error('[AI Contact Bridge] Failed to execute click handler:', error);
+      }
+    }, false);
   };
 
   const triggerRobustClick = (element: HTMLElement): void => {
@@ -495,6 +497,183 @@ import type { Lead } from './types';
       }
     }
     return undefined;
+  };
+
+  // Detect expired/consumed lead error modal
+  const detectExpiredLeadModal = (): { detected: boolean; modalElement?: HTMLElement; okButton?: HTMLElement } => {
+    const contexts = getInteractionContexts();
+    
+    // Keywords that indicate expired/consumed lead error
+    const errorKeywords = [
+      'buylead expired',
+      'expired',
+      'already consumed',
+      'maximum permissible sellers',
+      'consumed by maximum',
+      'no longer available'
+    ];
+
+    // Look for modal/alert elements
+    const modalSelectors = [
+      '.modal',
+      '.alert',
+      '.popup',
+      '.dialog',
+      '[role="dialog"]',
+      '[role="alertdialog"]',
+      '.modal-content',
+      '.alert-box',
+      '.error-modal',
+      '.warning-modal'
+    ];
+
+    for (const ctx of contexts) {
+      for (const selector of modalSelectors) {
+        const modal = ctx.querySelector<HTMLElement>(selector);
+        if (!modal || !isElementVisible(modal)) continue;
+
+        const modalText = sanitize(modal.textContent || '').toLowerCase();
+        
+        // Check if modal text contains error keywords
+        const hasErrorKeyword = errorKeywords.some(keyword => modalText.includes(keyword));
+        
+        if (hasErrorKeyword) {
+          // Look for OK button in the modal
+          const okButtonSelectors = [
+            'button',
+            'a[role="button"]',
+            '[role="button"]',
+            '.btn',
+            '.button',
+            '.ok-button',
+            '.close-button',
+            '[aria-label*="ok" i]',
+            '[aria-label*="close" i]'
+          ];
+
+          for (const btnSelector of okButtonSelectors) {
+            const buttons = modal.querySelectorAll<HTMLElement>(btnSelector);
+            for (const btn of buttons) {
+              if (!isElementVisible(btn)) continue;
+              const btnText = sanitize(btn.textContent || '').toLowerCase();
+              // Check if button text suggests it's an OK/Close button
+              if (btnText.includes('ok') || btnText.includes('close') || btnText.includes('dismiss') || 
+                  btn.getAttribute('aria-label')?.toLowerCase().includes('ok')) {
+                return { detected: true, modalElement: modal, okButton: btn };
+              }
+            }
+          }
+
+          // If modal detected but no OK button found, still return detected
+          // We'll try to find OK button elsewhere or use the modal itself
+          return { detected: true, modalElement: modal };
+        }
+      }
+    }
+
+    return { detected: false };
+  };
+
+  // Load skipped leads from storage
+  const loadSkippedLeads = async (): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      console.warn('[IndiaMART Agent] Chrome storage not available for loading skipped leads');
+      return;
+    }
+
+    try {
+      const result = await chrome.storage.local.get([SKIPPED_LEADS_KEY]);
+      const storedIds = result[SKIPPED_LEADS_KEY];
+      
+      if (Array.isArray(storedIds) && storedIds.length > 0) {
+        skippedLeads = new Set(storedIds.filter((id: any) => typeof id === 'string'));
+        console.log(`[IndiaMART Agent] Loaded ${skippedLeads.size} skipped lead IDs from storage`);
+      } else {
+        skippedLeads = new Set<string>();
+        console.log('[IndiaMART Agent] No skipped leads found in storage');
+      }
+    } catch (error) {
+      console.error('[IndiaMART Agent] Error loading skipped leads:', error);
+      skippedLeads = new Set<string>();
+    }
+  };
+
+  // Add a lead ID to the skip list
+  const addSkippedLead = async (leadId: string): Promise<void> => {
+    if (!leadId || typeof leadId !== 'string') {
+      console.warn('[IndiaMART Agent] Invalid leadId provided to addSkippedLead:', leadId);
+      return;
+    }
+
+    // Add to in-memory set
+    skippedLeads.add(leadId);
+
+    // Save to storage
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      console.warn('[IndiaMART Agent] Chrome storage not available for saving skipped leads');
+      return;
+    }
+
+    try {
+      const idsArray = Array.from(skippedLeads);
+      await chrome.storage.local.set({ [SKIPPED_LEADS_KEY]: idsArray });
+      console.log(`[IndiaMART Agent] Added lead ${leadId} to skip list. Total skipped: ${skippedLeads.size}`);
+    } catch (error) {
+      console.error('[IndiaMART Agent] Error saving skipped lead:', error);
+    }
+  };
+
+  // Check if a lead should be skipped
+  const isLeadSkipped = (leadId: string): boolean => {
+    if (!leadId) return false;
+    return skippedLeads.has(leadId);
+  };
+
+  // Dismiss expired lead modal by clicking OK button
+  const dismissExpiredLeadModal = async (): Promise<boolean> => {
+    const detection = detectExpiredLeadModal();
+    
+    if (!detection.detected) {
+      return false;
+    }
+
+    try {
+      // If we have an OK button, click it
+      if (detection.okButton) {
+        console.log('[IndiaMART Agent] Clicking OK button to dismiss expired lead modal...');
+        clickWithFallback(detection.okButton, 'OK Button');
+        await delay(500); // Wait a bit for modal to close
+        return true;
+      }
+
+      // Try to find OK button in the modal element
+      if (detection.modalElement) {
+        const okButtons = detection.modalElement.querySelectorAll<HTMLElement>(
+          'button, a[role="button"], [role="button"], .btn, .button'
+        );
+        
+        for (const btn of okButtons) {
+          if (!isElementVisible(btn)) continue;
+          const btnText = sanitize(btn.textContent || '').toLowerCase();
+          if (btnText.includes('ok') || btnText.includes('close') || btnText.includes('dismiss')) {
+            console.log('[IndiaMART Agent] Clicking OK button to dismiss expired lead modal...');
+            clickWithFallback(btn, 'OK Button');
+            await delay(500);
+            return true;
+          }
+        }
+
+        // Last resort: try pressing Escape key
+        console.log('[IndiaMART Agent] Trying to dismiss modal with Escape key...');
+        detection.modalElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+        await delay(500);
+        return true;
+      }
+    } catch (error) {
+      console.error('[IndiaMART Agent] Error dismissing expired lead modal:', error);
+    }
+
+    return false;
   };
 
   const composeContactMessage = (lead?: Lead): string => {
@@ -968,6 +1147,37 @@ import type { Lead } from './types';
     clickWithFallback(contactButton, 'Contact Buyer');
     console.info('[IndiaMART Agent] Clicked Contact Buyer button for lead:', lead?.companyName || cardIndex);
 
+    // Wait a moment for any modal to appear (expired/consumed lead error)
+    await delay(1000);
+
+    // Check for expired/consumed lead error modal
+    const expiredModal = detectExpiredLeadModal();
+    if (expiredModal.detected) {
+      console.warn('[IndiaMART Agent] ⚠️ Expired/consumed lead error detected for lead:', lead?.companyName || cardIndex, lead?.leadId);
+      
+      // Extract leadId and add to skip list
+      if (lead?.leadId) {
+        await addSkippedLead(lead.leadId);
+        console.log(`[IndiaMART Agent] ✅ Added lead ${lead.leadId} to skip list. This lead will be skipped in future refreshes.`);
+      } else {
+        console.warn('[IndiaMART Agent] Could not add lead to skip list: leadId not available');
+      }
+
+      // Dismiss the modal
+      const dismissed = await dismissExpiredLeadModal();
+      if (dismissed) {
+        console.log('[IndiaMART Agent] ✅ Dismissed expired lead modal');
+      } else {
+        console.warn('[IndiaMART Agent] ⚠️ Could not dismiss expired lead modal automatically');
+      }
+
+      // Return early with specific error
+      return { 
+        success: false, 
+        error: 'Lead expired or already consumed by maximum permissible sellers. Lead has been added to skip list.' 
+      };
+    }
+
     // Attempt to fill the message while the form loads
     const desiredMessage = composeContactMessage(lead);
     let messageFilled = fillContactMessage(desiredMessage);
@@ -1080,22 +1290,219 @@ import type { Lead } from './types';
 
   // Removed duplicate startScrapeLoop - defined later in the file
 
-  const enquiryKeywords = [
+  // Storage keys for filter configuration
+  const FILTER_KEYWORDS_KEY = 'indiamart_filter_keywords';
+  const FILTER_CATEGORIES_KEY = 'indiamart_filter_categories';
+  const FILTER_QUANTITY_KEY = 'indiamart_filter_quantity';
+  const FILTER_ORDER_VALUE_KEY = 'indiamart_filter_order_value';
+
+  // Default filter values (used as fallback)
+  const DEFAULT_ENQUIRY_KEYWORDS = [
     'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'school jackets', 'nurse uniform',
     'chef coats', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
     'kids school uniform', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
     'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety suits',
     'boys school uniform', 'surgical gown', 'hospital uniforms'
   ];
-  const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
-  const quantityThreshold = { min: 100, unit: 'piece' };
-  const allowedCategories = [
+  const DEFAULT_ALLOWED_CATEGORIES = [
     'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
     'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
     'safety suits', 'boys school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
     'school jackets'
   ];
-  const orderValueMin = 50000;
+
+  // Mutable filter arrays (loaded from storage on init)
+  let enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
+  let allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
+
+  const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
+  let quantityThreshold = { min: 100, unit: 'piece' };
+  let orderValueMin = 50000;
+
+  // Validation helpers
+  const validateKeyword = (keyword: string): boolean => {
+    const trimmed = keyword.trim();
+    return trimmed.length > 0 && trimmed.length <= 100;
+  };
+
+  const sanitizeKeyword = (keyword: string): string => {
+    return keyword.trim().toLowerCase();
+  };
+
+  // Load filter keywords and categories from storage
+  const loadFilterConfig = async (): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      console.warn('[IndiaMART Agent] Chrome storage not available, using defaults');
+      return;
+    }
+
+    try {
+      const result = await chrome.storage.local.get([
+        FILTER_KEYWORDS_KEY, 
+        FILTER_CATEGORIES_KEY,
+        FILTER_QUANTITY_KEY,
+        FILTER_ORDER_VALUE_KEY
+      ]);
+      console.log('[IndiaMART Agent] Storage load result:', {
+        hasKeywords: result[FILTER_KEYWORDS_KEY] !== undefined,
+        hasCategories: result[FILTER_CATEGORIES_KEY] !== undefined,
+        keywordsCount: Array.isArray(result[FILTER_KEYWORDS_KEY]) ? result[FILTER_KEYWORDS_KEY].length : 0,
+        categoriesCount: Array.isArray(result[FILTER_CATEGORIES_KEY]) ? result[FILTER_CATEGORIES_KEY].length : 0
+      });
+      
+      // Load keywords: update if key exists in storage (even if empty array)
+      if (result[FILTER_KEYWORDS_KEY] !== undefined) {
+        if (Array.isArray(result[FILTER_KEYWORDS_KEY])) {
+          const storedKeywords = result[FILTER_KEYWORDS_KEY]
+            .filter((k: string) => typeof k === 'string' && validateKeyword(k))
+            .map((k: string) => k.trim())
+            .slice(0, 500); // Limit to 500 items
+          enquiryKeywords = storedKeywords;
+          console.log(`[IndiaMART Agent] ✅ Updated keywords array from storage: ${enquiryKeywords.length} keywords`);
+          console.log(`[IndiaMART Agent] Keywords list:`, enquiryKeywords.slice(0, 10), enquiryKeywords.length > 10 ? '...' : '');
+        } else {
+          console.warn('[IndiaMART Agent] Invalid keywords format in storage, using defaults');
+          enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
+        }
+      } else {
+        // Key doesn't exist in storage, use defaults
+        console.log('[IndiaMART Agent] No keywords in storage, using defaults');
+        enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
+      }
+
+      // Load categories: update if key exists in storage (even if empty array)
+      if (result[FILTER_CATEGORIES_KEY] !== undefined) {
+        if (Array.isArray(result[FILTER_CATEGORIES_KEY])) {
+          const storedCategories = result[FILTER_CATEGORIES_KEY]
+            .filter((c: string) => typeof c === 'string' && validateKeyword(c))
+            .map((c: string) => c.trim())
+            .slice(0, 500); // Limit to 500 items
+          allowedCategories = storedCategories;
+          console.log(`[IndiaMART Agent] ✅ Updated categories array from storage: ${allowedCategories.length} categories`);
+          console.log(`[IndiaMART Agent] Categories list:`, allowedCategories.slice(0, 10), allowedCategories.length > 10 ? '...' : '');
+        } else {
+          console.warn('[IndiaMART Agent] Invalid categories format in storage, using defaults');
+          allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
+        }
+      } else {
+        // Key doesn't exist in storage, use defaults
+        console.log('[IndiaMART Agent] No categories in storage, using defaults');
+        allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
+      }
+
+      // Load quantity threshold: update if key exists in storage
+      if (result[FILTER_QUANTITY_KEY] !== undefined) {
+        const stored = result[FILTER_QUANTITY_KEY];
+        if (stored && typeof stored === 'object' && typeof stored.min === 'number' && typeof stored.unit === 'string') {
+          quantityThreshold = {
+            min: Math.max(1, Math.min(stored.min, 1000000)), // Validate range 1-1M
+            unit: (stored.unit || 'piece').trim().toLowerCase()
+          };
+          console.log(`[IndiaMART Agent] ✅ Updated quantity threshold from storage: ≥ ${quantityThreshold.min} ${quantityThreshold.unit}`);
+        } else {
+          console.warn('[IndiaMART Agent] Invalid quantity format in storage, using defaults');
+        }
+      } else {
+        console.log('[IndiaMART Agent] No quantity threshold in storage, using defaults');
+      }
+
+      // Load order value minimum: update if key exists in storage
+      if (result[FILTER_ORDER_VALUE_KEY] !== undefined) {
+        const stored = result[FILTER_ORDER_VALUE_KEY];
+        if (typeof stored === 'number' && stored >= 0 && stored <= 100000000) { // Validate range 0-100M
+          orderValueMin = stored;
+          console.log(`[IndiaMART Agent] ✅ Updated order value minimum from storage: ₹${orderValueMin.toLocaleString()}`);
+        } else {
+          console.warn('[IndiaMART Agent] Invalid order value format in storage, using defaults');
+        }
+      } else {
+        console.log('[IndiaMART Agent] No order value minimum in storage, using defaults');
+      }
+
+      // Verify arrays are actually updated
+      console.log('[IndiaMART Agent] Runtime arrays after load:', {
+        enquiryKeywordsLength: enquiryKeywords.length,
+        allowedCategoriesLength: allowedCategories.length,
+        quantityThreshold: quantityThreshold,
+        orderValueMin: orderValueMin,
+        firstFewKeywords: enquiryKeywords.slice(0, 5),
+        firstFewCategories: allowedCategories.slice(0, 5)
+      });
+
+      // Mark config as loaded
+      filterConfigLoaded = true;
+      console.log('[IndiaMART Agent] ✅ Filter config loaded and ready');
+    } catch (error) {
+      console.error('[IndiaMART Agent] Error loading filter config from storage:', error);
+      // Fallback to defaults on error
+      enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
+      allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
+      filterConfigLoaded = true; // Mark as loaded even on error (using defaults)
+    }
+  };
+
+  // Save filter keywords and categories to storage
+  const saveFilterConfig = async (
+    keywords?: string[], 
+    categories?: string[],
+    quantity?: { min: number; unit: string },
+    orderValue?: number
+  ): Promise<boolean> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      console.warn('[IndiaMART Agent] Chrome storage not available, cannot save');
+      return false;
+    }
+
+    try {
+      const toSave: Record<string, any> = {};
+
+      if (keywords) {
+        const validated = keywords
+          .filter(validateKeyword)
+          .map(k => k.trim())
+          .slice(0, 500);
+        toSave[FILTER_KEYWORDS_KEY] = validated;
+        enquiryKeywords = validated;
+      }
+
+      if (categories) {
+        const validated = categories
+          .filter(validateKeyword)
+          .map(c => c.trim())
+          .slice(0, 500);
+        toSave[FILTER_CATEGORIES_KEY] = validated;
+        allowedCategories = validated;
+      }
+
+      // Save quantity threshold
+      if (quantity !== undefined) {
+        const validated = {
+          min: Math.max(1, Math.min(quantity.min, 1000000)), // Validate range 1-1M
+          unit: (quantity.unit || 'piece').trim().toLowerCase()
+        };
+        toSave[FILTER_QUANTITY_KEY] = validated;
+        quantityThreshold = validated;
+      }
+
+      // Save order value minimum
+      if (orderValue !== undefined) {
+        const validated = Math.max(0, Math.min(orderValue, 100000000)); // Validate range 0-100M
+        toSave[FILTER_ORDER_VALUE_KEY] = validated;
+        orderValueMin = validated;
+      }
+
+      if (Object.keys(toSave).length > 0) {
+        await chrome.storage.local.set(toSave);
+        console.log('[IndiaMART Agent] Saved filter config to storage');
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error('[IndiaMART Agent] Error saving filter config to storage:', error);
+      return false;
+    }
+  };
 
   const getFilterCriteria = () => ({
     keywords: enquiryKeywords,
@@ -1106,6 +1513,15 @@ import type { Lead } from './types';
   });
 
   const applyIntelligentFilter = (lead: Lead): { passed: boolean; reason: string; nextContactDelayMinutes: number } => {
+    // Wait for filter config to load if not ready
+    if (!filterConfigLoaded) {
+      console.warn('[IndiaMART Agent] ⚠️ Filter config not loaded yet, skipping filter for:', lead.enquiryTitle);
+      return { passed: false, reason: 'Filter config not loaded', nextContactDelayMinutes: 0 };
+    }
+
+    // Note: We're using the runtime arrays (enquiryKeywords, allowedCategories) which are updated from storage
+    // These arrays are NOT the hardcoded DEFAULT arrays - they're mutable variables that get updated
+
     // Filter 1: Enquiry Title Keywords (inclusive match)
     const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
     const hasKeyword = enquiryKeywords.some(keyword => titleLower.includes(keyword));
@@ -1482,6 +1898,13 @@ import type { Lead } from './types';
       return;
     }
     
+    // Wait for filter config to load before processing
+    if (!filterConfigLoaded) {
+      lastProcessingTime = Date.now();
+      console.log('[IndiaMART Agent] ⏳ Waiting for filter config to load before processing leads...');
+      return;
+    }
+    
     if (isLeadProcessingRunning) {
       lastProcessingTime = Date.now();
       console.debug('[IndiaMART Agent] Skipping processLeadsWithFiltering - already running.');
@@ -1505,12 +1928,29 @@ import type { Lead } from './types';
       
       console.log('[IndiaMART Agent] Processing leads with filtering...');
       console.log('[IndiaMART Agent] Total leads to process:', leads.length);
+      console.log('[IndiaMART Agent] Using filter arrays from storage:', {
+        keywordsCount: enquiryKeywords.length,
+        categoriesCount: allowedCategories.length,
+        firstFewKeywords: enquiryKeywords.slice(0, 5),
+        firstFewCategories: allowedCategories.slice(0, 5)
+      });
       
       // Apply filtering
       for (const lead of leads) {
         if (processedLeads.has(lead.leadId)) {
           console.log(`[IndiaMART Agent] Skipping already processed lead: ${lead.companyName}`);
           continue; // Skip already processed
+        }
+
+        // Check if lead is in skip list (expired/consumed leads)
+        if (isLeadSkipped(lead.leadId)) {
+          console.log(`[IndiaMART Agent] ⏭️ Skipping expired/consumed lead: ${lead.companyName} (${lead.leadId})`);
+          leadEvaluations.push({ 
+            lead, 
+            passed: false, 
+            reason: 'Lead expired or already consumed by maximum permissible sellers (in skip list)' 
+          });
+          continue; // Skip expired/consumed leads
         }
         
         const filterResult = applyIntelligentFilter(lead);
@@ -1739,6 +2179,35 @@ import type { Lead } from './types';
       }
       return true;
     }
+
+    if (message.type === 'FILTER_KEYWORDS_UPDATED') {
+      // Reload filter config from storage and re-run filtering if active
+      console.log('[IndiaMART Agent] 📥 Received FILTER_KEYWORDS_UPDATED message, reloading filter config from storage...');
+      loadFilterConfig()
+        .then(() => {
+          console.log(`[IndiaMART Agent] ✅ Filter config reloaded successfully!`);
+          console.log(`[IndiaMART Agent] Runtime arrays now:`, {
+            keywordsCount: enquiryKeywords.length,
+            categoriesCount: allowedCategories.length,
+            keywords: enquiryKeywords.slice(0, 10),
+            categories: allowedCategories.slice(0, 10)
+          });
+          
+          // Notify popup of updated criteria
+          chrome.runtime.sendMessage({ type: 'FILTER_CRITERIA_UPDATE', payload: getFilterCriteria() });
+          
+          // Re-run filtering if auto-contact is enabled
+          if (isAutoContactEnabled && !isStopped) {
+            console.log('[IndiaMART Agent] 🔄 Re-running filtering with updated arrays...');
+            processLeadsWithFiltering();
+          }
+        })
+        .catch((error) => {
+          console.error('[IndiaMART Agent] ❌ Error reloading filter config:', error);
+        });
+      sendResponse({ success: true });
+      return true;
+    }
   });
 
   // Initial scraping
@@ -1782,6 +2251,16 @@ import type { Lead } from './types';
     }, SCRAPE_INTERVAL_MS);
   };
   
-  startZeroBalanceObserver();
-  syncAutoContactState();
+  // Initialize: Load filter config and skipped leads from storage, then start observers
+  void Promise.all([loadFilterConfig(), loadSkippedLeads()])
+    .then(() => {
+      console.log('[IndiaMART Agent] Filter config and skipped leads initialized from storage');
+      startZeroBalanceObserver();
+      syncAutoContactState();
+    })
+    .catch((error) => {
+      console.error('[IndiaMART Agent] Failed to load config, using defaults:', error);
+      startZeroBalanceObserver();
+      syncAutoContactState();
+    });
 })(); // End of IIFE
