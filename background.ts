@@ -34,6 +34,14 @@ type SuspensionState = {
 };
 
 let suspensionState: SuspensionState = { active: false };
+type DailyContactStats = {
+  date: string;
+  count: number;
+  limit: number;
+  dayOfWeek: number;
+};
+
+let dailyStatsCache: DailyContactStats | null = null;
 
 const setBadge = (text: string, title: string, color: string) => {
   try {
@@ -337,6 +345,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         agentStopped: autoContactState.stopped,
         autoContactEnabled: autoContactState.enabled,
         leadsPayload: latestLeadsPayload,
+        dailyStats: dailyStatsCache,
       });
     };
 
@@ -501,6 +510,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       autoContactEnabled: autoContactState.enabled,
       statistics: autoContactState.statistics,
       leadsPayload: latestLeadsPayload,
+      dailyStats: dailyStatsCache,
     });
     return true;
   } else if (message.type === 'LOG_PROCESSING_SUCCESS') {
@@ -512,6 +522,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     lastSuccessfulLogTime = Date.now();
     setBadge('OK', `Last update: ${new Date().toLocaleTimeString()}`, '#16a34a');
     notify('indiamart-update', 'IndiaMART Agent: Logs updated', `Updated at ${new Date().toLocaleTimeString()}`);
+    return true;
+  } else if (message.type === 'DAILY_CONTACT_STATS') {
+    dailyStatsCache = message.payload ?? null;
+    if (
+      dailyStatsCache &&
+      dailyStatsCache.count < dailyStatsCache.limit &&
+      !suspensionState.active
+    ) {
+      setBadge('', 'IndiaMART Agent', '#0ea5e9');
+    }
+    sendMessageSafe({ type: 'DAILY_CONTACT_STATS', payload: dailyStatsCache });
+    sendResponse?.({ success: true });
+    return true;
+  } else if (message.type === 'DAILY_CONTACT_LIMIT_REACHED') {
+    dailyStatsCache = message.payload ?? dailyStatsCache;
+    notify(
+      'indiamart-daily-limit',
+      'IndiaMART Agent: Daily quota met',
+      'Automation will resume automatically tomorrow.'
+    );
+    sendMessageSafe({ type: 'DAILY_CONTACT_LIMIT_REACHED', payload: dailyStatsCache });
+    setBadge('DQ', 'Daily quota reached', '#f97316');
+    sendResponse?.({ success: true });
+    return true;
+  } else if (message.type === 'AUTOMATION_BACKOFF') {
+    const resumeAt = message.payload?.resumeAt
+      ? new Date(message.payload.resumeAt).toLocaleTimeString()
+      : 'soon';
+    notify('indiamart-backoff', 'IndiaMART Agent: Cooling off', `Resuming around ${resumeAt}.`);
+    sendMessageSafe({ type: 'AUTOMATION_BACKOFF', payload: message.payload });
+    setBadge('...', 'Temporarily pausing to mimic human behavior', '#facc15');
+    sendResponse?.({ success: true });
     return true;
   }
 });

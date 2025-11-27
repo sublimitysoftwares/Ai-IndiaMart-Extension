@@ -29,6 +29,26 @@ interface FilterCriteria {
   categories?: string[];
 }
 
+interface DailyContactStatsSummary {
+  date: string;
+  count: number;
+  limit: number;
+  dayOfWeek: number;
+}
+
+interface CycleSummary {
+  timestamp: string;
+  totalLeads: number;
+  qualifiedLeads: number;
+  selectedLeads: Array<{ id?: string; company?: string; orderValue?: string }>;
+  skippedLeads?: number;
+  buyLeadBalance?: number;
+  actions?: string[];
+  errors?: string[];
+  dailyStats?: DailyContactStatsSummary;
+  backoffActive?: boolean;
+}
+
 const App: React.FC = () => {
   const [appState, setAppState] = useState<AppState>(AppState.Idle);
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -49,6 +69,10 @@ const App: React.FC = () => {
   const [showSuccess, setShowSuccess] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [filterCriteria, setFilterCriteria] = useState<FilterCriteria | null>(null);
+  const [cycleSummary, setCycleSummary] = useState<CycleSummary | null>(null);
+  const [dailyStats, setDailyStats] = useState<DailyContactStatsSummary | null>(null);
+  const [backoffNotice, setBackoffNotice] = useState<string | null>(null);
+  const backoffTimerRef = React.useRef<number | null>(null);
   
   // Settings state
   const [keywords, setKeywords] = useState<string[]>([]);
@@ -85,6 +109,9 @@ const App: React.FC = () => {
       chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (response) => {
         if (!response || response.success === false) {
           return;
+        }
+        if (response.dailyStats) {
+          setDailyStats(response.dailyStats);
         }
 
         if (response.agentStopped) {
@@ -173,6 +200,22 @@ const App: React.FC = () => {
             if (message.payload.filters) {
               setFilterCriteria(message.payload.filters);
             }
+            if (message.payload.cycleSummary) {
+              setCycleSummary(message.payload.cycleSummary);
+              if (message.payload.cycleSummary.dailyStats) {
+                setDailyStats(message.payload.cycleSummary.dailyStats);
+              }
+              if (message.payload.cycleSummary.backoffActive) {
+                setBackoffNotice('Automation is cooling off briefly to mimic human behavior.');
+                if (backoffTimerRef.current) {
+                  window.clearTimeout(backoffTimerRef.current);
+                }
+                backoffTimerRef.current = window.setTimeout(() => {
+                  setBackoffNotice(null);
+                  backoffTimerRef.current = null;
+                }, 5 * 60 * 1000);
+              }
+            }
           }
         } else if (message.type === 'FILTER_CRITERIA_UPDATE') {
           if (message.payload) {
@@ -213,6 +256,34 @@ const App: React.FC = () => {
             setLeads([]);
             setFilteredLeads([]);
             agentStoppedRef.current = true;
+        } else if (message.type === 'DAILY_CONTACT_STATS') {
+          if (message.payload) {
+            setDailyStats(message.payload);
+          }
+        } else if (message.type === 'DAILY_CONTACT_LIMIT_REACHED') {
+          if (message.payload) {
+            setDailyStats(message.payload);
+          }
+          setBackoffNotice('Daily quota reached. Automation will resume automatically after midnight.');
+          if (backoffTimerRef.current) {
+            window.clearTimeout(backoffTimerRef.current);
+          }
+          backoffTimerRef.current = window.setTimeout(() => {
+            setBackoffNotice(null);
+            backoffTimerRef.current = null;
+          }, 60 * 60 * 1000);
+        } else if (message.type === 'AUTOMATION_BACKOFF') {
+          const resumeAt = message.payload?.resumeAt
+            ? new Date(message.payload.resumeAt).toLocaleTimeString()
+            : 'soon';
+          setBackoffNotice(`Cooling off briefly. Expected to resume around ${resumeAt}.`);
+          if (backoffTimerRef.current) {
+            window.clearTimeout(backoffTimerRef.current);
+          }
+          backoffTimerRef.current = window.setTimeout(() => {
+            setBackoffNotice(null);
+            backoffTimerRef.current = null;
+          }, 10 * 60 * 1000);
         }
       };
 
@@ -222,6 +293,10 @@ const App: React.FC = () => {
         // Check again in case the context is lost during cleanup
         if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
            chrome.runtime.onMessage.removeListener(messageListener);
+        }
+        if (backoffTimerRef.current) {
+          window.clearTimeout(backoffTimerRef.current);
+          backoffTimerRef.current = null;
         }
       };
     } else {
@@ -721,6 +796,31 @@ const App: React.FC = () => {
                      Agent Stopped - Click "Start Agent" to resume
                    </div>
                  )}
+               {dailyStats && (
+                 <div className="mt-2 flex justify-between text-xs text-slate-400">
+                   <span>Daily Quota</span>
+                   <span className={dailyStats.count >= dailyStats.limit ? 'text-red-400 font-semibold' : 'text-green-400 font-semibold'}>
+                     {dailyStats.count} / {dailyStats.limit} ({dailyStats.date})
+                   </span>
+                 </div>
+               )}
+               {backoffNotice && (
+                 <div className="mt-2 p-2 bg-amber-900/30 border border-amber-500/40 rounded text-xs text-amber-100 flex items-center justify-between gap-2">
+                   <span>{backoffNotice}</span>
+                   <button
+                     onClick={() => {
+                       setBackoffNotice(null);
+                       if (backoffTimerRef.current) {
+                         window.clearTimeout(backoffTimerRef.current);
+                         backoffTimerRef.current = null;
+                       }
+                     }}
+                     className="text-amber-200 hover:text-white text-[10px] uppercase tracking-wide"
+                   >
+                     Dismiss
+                   </button>
+                 </div>
+               )}
                </div>
                
                {/* Filter Criteria Display */}
@@ -741,6 +841,69 @@ const App: React.FC = () => {
                           {filterCriteria.keywords.length > 6 ? ', …' : ''}
                         </div>
                       )}
+              {cycleSummary && (
+                <div className="mt-3 p-3 bg-slate-900/40 border border-slate-800 rounded text-xs text-slate-300 space-y-1">
+                  <div className="text-slate-100 font-semibold">
+                    Last Cycle: {new Date(cycleSummary.timestamp).toLocaleTimeString()}
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Scanned</span>
+                    <span>{cycleSummary.totalLeads}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Qualified</span>
+                    <span>{cycleSummary.qualifiedLeads}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span>Selected</span>
+                    <span>{cycleSummary.selectedLeads?.length || 0}</span>
+                  </div>
+                  {typeof cycleSummary.skippedLeads === 'number' && (
+                    <div className="flex justify-between">
+                      <span>Skipped (human)</span>
+                      <span>{cycleSummary.skippedLeads}</span>
+                    </div>
+                  )}
+                  {typeof cycleSummary.buyLeadBalance === 'number' && (
+                    <div className="flex justify-between">
+                      <span>BuyLead Balance</span>
+                      <span>{cycleSummary.buyLeadBalance}</span>
+                    </div>
+                  )}
+                  {cycleSummary.selectedLeads && cycleSummary.selectedLeads.length > 0 && (
+                    <div>
+                      <div className="text-slate-400 mt-1">Selected Leads:</div>
+                      <ul className="list-disc list-inside text-slate-400">
+                        {cycleSummary.selectedLeads.map((lead, idx) => (
+                          <li key={`selected-${lead.id || idx}`}>
+                            {lead.company || lead.id} {lead.orderValue ? `(${lead.orderValue})` : ''}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {cycleSummary.actions && cycleSummary.actions.length > 0 && (
+                    <div>
+                      <div className="text-slate-400 mt-1">Actions:</div>
+                      <ul className="list-disc list-inside text-slate-400">
+                        {cycleSummary.actions.map((action: string, idx: number) => (
+                          <li key={`action-${idx}`}>{action}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {cycleSummary.errors && cycleSummary.errors.length > 0 && (
+                    <div>
+                      <div className="text-red-400 mt-1">Errors:</div>
+                      <ul className="list-disc list-inside text-red-400">
+                        {cycleSummary.errors.map((error: string, idx: number) => (
+                          <li key={`error-${idx}`}>{error}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
                       {filterCriteria.foreignIndicators && filterCriteria.foreignIndicators.length > 0 && (
                         <div>
                           ✓ Location: Rejects foreign leads ({filterCriteria.foreignIndicators.map((item) =>

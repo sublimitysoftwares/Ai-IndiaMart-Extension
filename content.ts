@@ -46,7 +46,9 @@ import type { Lead } from './types';
   ];
   const SCRAPE_INTERVAL_MS = 1000;
   const SCRAPE_MAX_ATTEMPTS = 15;
-  const REFRESH_INTERVAL = 30 * 1000; // 30 seconds
+  const WORKING_HOURS = { start: 9, end: 21 }; // 9 AM – 9 PM
+  const WORKING_REFRESH_RANGE_MINUTES = { min: 5, max: 15 };
+  const OFF_HOURS_REFRESH_RANGE_MINUTES = { min: 65, max: 90 };
   const MIN_LEAD_TARGET = 50; // desired minimum number of leads before processing
   const AUTO_SCROLL_MAX_ATTEMPTS = 8;
   const AUTO_SCROLL_DELAY_MS = 1200;
@@ -60,7 +62,7 @@ import type { Lead } from './types';
   let lastContactTime = 0;
   let processedLeads = new Set<string>();
   let pageRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-  let periodicProcessInterval: ReturnType<typeof setInterval> | null = null;
+  let processingTimer: ReturnType<typeof setTimeout> | null = null;
   let filteredLeadsCount = 0;
   let contactedLeadsCount = 0;
   let pendingContacts: Lead[] = [];
@@ -69,6 +71,8 @@ import type { Lead } from './types';
   let lastProcessingTime = Date.now();
   let isTabVisible = !document.hidden;
   let lastAutoScrollRun = 0;
+  let lastScheduledRefreshWindow = '';
+  let lastScheduledProcessingWindow = '';
   let initialScrapeInterval: ReturnType<typeof setInterval> | null = null;
   let isLeadProcessingRunning = false;
   let contactInFlight = false;
@@ -76,15 +80,21 @@ import type { Lead } from './types';
   let zeroBalanceObserver: MutationObserver | null = null;
   let filterConfigLoaded = false; // Track if filter config has been loaded from storage
   let skippedLeads = new Set<string>(); // In-memory set of skipped lead IDs for fast lookups
+  let backoffUntil = 0;
+  const recentErrors: number[] = [];
+  const BACKOFF_ERROR_THRESHOLD = 3;
+  const BACKOFF_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+  const BACKOFF_MIN_DELAY_MS = 5 * 60 * 1000;
+  const BACKOFF_MAX_DELAY_MS = 10 * 60 * 1000;
 
   const stopAutomationTimers = (): void => {
     if (pageRefreshTimer) {
       clearTimeout(pageRefreshTimer);
       pageRefreshTimer = null;
     }
-    if (periodicProcessInterval) {
-      clearInterval(periodicProcessInterval);
-      periodicProcessInterval = null;
+    if (processingTimer) {
+      clearTimeout(processingTimer);
+      processingTimer = null;
     }
     if (initialScrapeInterval) {
       clearInterval(initialScrapeInterval);
@@ -104,6 +114,51 @@ import type { Lead } from './types';
     isStopped = stopped;
     isLeadProcessingRunning = false;
     contactInFlight = false;
+  };
+
+  const randomBetween = (min: number, max: number): number => Math.random() * (max - min) + min;
+  const randomIntBetween = (min: number, max: number): number =>
+    Math.floor(randomBetween(min, max + 1));
+
+  const describeScheduleWindow = (isWorkingHours: boolean): string =>
+    isWorkingHours ? '09:00-21:00' : '21:00-09:00';
+
+  const getStealthDelayMs = (): number => {
+    const now = new Date();
+    const hour = now.getHours();
+    const isWorkingHours = hour >= WORKING_HOURS.start && hour < WORKING_HOURS.end;
+    const range = isWorkingHours ? WORKING_REFRESH_RANGE_MINUTES : OFF_HOURS_REFRESH_RANGE_MINUTES;
+    const delayMinutes = randomBetween(range.min, range.max);
+    const descriptor = describeScheduleWindow(isWorkingHours);
+    console.log(
+      `[IndiaMART Agent] Scheduling next stealth window (${descriptor}) in ${delayMinutes.toFixed(2)} minutes.`
+    );
+    return delayMinutes * 60 * 1000;
+  };
+
+  const registerAutomationError = (reason: string) => {
+    const now = Date.now();
+    recentErrors.push(now);
+    while (recentErrors.length && now - recentErrors[0] > BACKOFF_WINDOW_MS) {
+      recentErrors.shift();
+    }
+    console.warn(`[IndiaMART Agent] Logged automation error (${recentErrors.length}/${BACKOFF_ERROR_THRESHOLD}): ${reason}`);
+    if (recentErrors.length >= BACKOFF_ERROR_THRESHOLD) {
+      backoffUntil = now + randomBetween(BACKOFF_MIN_DELAY_MS, BACKOFF_MAX_DELAY_MS);
+      recentErrors.length = 0;
+      console.warn(
+        `[IndiaMART Agent] Entering natural back-off until ${new Date(backoffUntil).toLocaleTimeString()}.`
+      );
+      chrome.runtime?.sendMessage?.({
+        type: 'AUTOMATION_BACKOFF',
+        payload: { resumeAt: backoffUntil, reason },
+      });
+    }
+  };
+
+  const clearAutomationErrors = () => {
+    recentErrors.length = 0;
+    backoffUntil = Math.min(backoffUntil, Date.now());
   };
 
   const syncAutoContactState = () => {
@@ -156,6 +211,79 @@ import type { Lead } from './types';
       }
     });
     return contexts;
+  };
+
+  const simulateMouseMove = (element?: HTMLElement): void => {
+    const rect = element?.getBoundingClientRect();
+    const fallbackX = randomBetween(100, Math.max(120, window.innerWidth - 100));
+    const fallbackY = randomBetween(120, Math.max(140, window.innerHeight - 120));
+    const clientX = rect
+      ? rect.left + randomBetween(rect.width * 0.2, rect.width * 0.8)
+      : fallbackX;
+    const clientY = rect
+      ? rect.top + randomBetween(rect.height * 0.2, rect.height * 0.8)
+      : fallbackY;
+    const moveEvent = new MouseEvent('mousemove', {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+      movementX: randomBetween(-5, 5),
+      movementY: randomBetween(-5, 5),
+      view: window,
+    });
+    (element || document.body || document).dispatchEvent(moveEvent);
+  };
+
+  const simulateHoverDelay = async (element: HTMLElement): Promise<void> => {
+    const passes = randomIntBetween(2, 4);
+    for (let i = 0; i < passes; i++) {
+      simulateMouseMove(element);
+      await delay(randomBetween(80, 180));
+    }
+    await delay(randomBetween(400, 1200));
+  };
+
+  const simulatePostClickMovement = async (element?: HTMLElement): Promise<void> => {
+    await delay(randomBetween(200, 600));
+    simulateMouseMove(element);
+    await delay(randomBetween(120, 300));
+    simulateMouseMove();
+  };
+
+  const humanScrollBy = async (distance: number): Promise<void> => {
+    window.scrollBy({ top: distance, behavior: 'smooth' });
+    simulateMouseMove();
+    await delay(randomBetween(500, 1200));
+  };
+
+  const performHumanScrollPass = async (direction: 'down' | 'up'): Promise<void> => {
+    const steps = randomIntBetween(3, 7);
+    for (let i = 0; i < steps; i++) {
+      const distance = randomBetween(80, 220) * (direction === 'down' ? 1 : -1);
+      await humanScrollBy(distance);
+      await delay(randomBetween(500, 2500));
+    }
+  };
+
+  const pickRandomSkipIndexes = (total: number): Set<number> => {
+    const skipCount = total <= 3 ? randomIntBetween(0, 1) : randomIntBetween(1, 2);
+    const indexes = new Set<number>();
+    while (indexes.size < skipCount) {
+      const index = randomIntBetween(0, Math.max(0, total - 1));
+      indexes.add(index);
+      if (indexes.size >= total) break;
+    }
+    return indexes;
+  };
+
+  const applyReadingDelay = async (lead: Lead): Promise<void> => {
+    const title = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
+    const isPromising = enquiryKeywords.some((keyword) => title.includes(keyword.toLowerCase()));
+    const min = isPromising ? 2000 : 1000;
+    const max = isPromising ? 5000 : 3000;
+    const waitMs = randomBetween(min, max);
+    await delay(waitMs);
   };
 
   const isElementVisible = (element: HTMLElement | null | undefined): element is HTMLElement => {
@@ -213,7 +341,7 @@ import type { Lead } from './types';
     }, false);
   };
 
-  const triggerRobustClick = (element: HTMLElement): void => {
+  const triggerRobustClick = async (element: HTMLElement): Promise<void> => {
     installClickBridge();
 
     try {
@@ -227,6 +355,7 @@ import type { Lead } from './types';
     }
 
     element.focus({ preventScroll: true });
+    await simulateHoverDelay(element);
 
     const pointerInit: PointerEventInit = {
       bubbles: true,
@@ -247,10 +376,10 @@ import type { Lead } from './types';
       element.dispatchEvent(evt);
     });
 
-    ['mousedown', 'mouseup', 'click'].forEach((type) => {
-      const evt = new MouseEvent(type, mouseInit);
-      element.dispatchEvent(evt);
-    });
+    for (const type of ['mousedown', 'mouseup', 'click'] as const) {
+      element.dispatchEvent(new MouseEvent(type, mouseInit));
+      await delay(randomBetween(30, 60));
+    }
 
     if (typeof element.click === 'function') {
       element.click();
@@ -270,25 +399,26 @@ import type { Lead } from './types';
     if (selector) {
       window.postMessage({ type: 'AI_CONTACT_BRIDGE_CLICK', selector }, '*');
     }
+    await simulatePostClickMovement(element);
   };
 
-  const clickWithFallback = (element: HTMLElement, label: string): void => {
+  const clickWithFallback = async (element: HTMLElement, label: string): Promise<void> => {
     console.debug(`[IndiaMART Agent] Triggering ${label} action via robust click.`);
     try {
-      triggerRobustClick(element);
+      await triggerRobustClick(element);
     } catch (error) {
       console.error(`[IndiaMART Agent] Robust click failed for ${label}:`, error);
     }
 
-    setTimeout(() => {
-      if (!element.isConnected) return;
-      try {
-        element.click();
-        console.debug(`[IndiaMART Agent] Executed fallback click for ${label}.`);
-      } catch (error) {
-        console.warn(`[IndiaMART Agent] Fallback click failed for ${label}:`, error);
-      }
-    }, 200);
+    if (!element.isConnected) return;
+    await delay(randomBetween(150, 350));
+
+    try {
+      element.click();
+      console.debug(`[IndiaMART Agent] Executed fallback click for ${label}.`);
+    } catch (error) {
+      console.warn(`[IndiaMART Agent] Fallback click failed for ${label}:`, error);
+    }
   };
 
   const locateContactButton = (card: Element): HTMLElement | null => {
@@ -641,7 +771,7 @@ import type { Lead } from './types';
       // If we have an OK button, click it
       if (detection.okButton) {
         console.log('[IndiaMART Agent] Clicking OK button to dismiss expired lead modal...');
-        clickWithFallback(detection.okButton, 'OK Button');
+        await clickWithFallback(detection.okButton, 'OK Button');
         await delay(500); // Wait a bit for modal to close
         return true;
       }
@@ -657,7 +787,7 @@ import type { Lead } from './types';
           const btnText = sanitize(btn.textContent || '').toLowerCase();
           if (btnText.includes('ok') || btnText.includes('close') || btnText.includes('dismiss')) {
             console.log('[IndiaMART Agent] Clicking OK button to dismiss expired lead modal...');
-            clickWithFallback(btn, 'OK Button');
+            await clickWithFallback(btn, 'OK Button');
             await delay(500);
             return true;
           }
@@ -865,6 +995,21 @@ import type { Lead } from './types';
     }
   };
 
+  const getBuyLeadBalanceEstimate = (): number | undefined => {
+    if (!document.body) return undefined;
+    try {
+      const text = document.body.innerText;
+      if (!text) return undefined;
+      const match = text.match(/buy\s*lead(?:s)?\s*balance\s*[:\-]?\s*([0-9,]+)/i);
+      if (!match) return undefined;
+      const value = Number(match[1].replace(/[^0-9]/g, ''));
+      return Number.isFinite(value) ? value : undefined;
+    } catch (error) {
+      console.debug('[IndiaMART Agent] Failed to parse BuyLead balance text:', error);
+      return undefined;
+    }
+  };
+
   const notifyZeroBalanceSuspension = () => {
     try {
       chrome.runtime.sendMessage({ type: 'BUY_LEAD_BALANCE_ZERO' });
@@ -961,13 +1106,17 @@ import type { Lead } from './types';
     while (attempt < maxAttempts) {
       attempt += 1;
 
-      window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
-      const clicked = attemptClickLoadMore();
-      if (!clicked) {
-        window.scrollTo({ top: document.body.scrollHeight + 500, behavior: 'smooth' });
+      await performHumanScrollPass('down');
+      if (Math.random() < 0.35) {
+        await performHumanScrollPass('up');
       }
 
-      await delay(delayMs);
+      const clicked = attemptClickLoadMore();
+      if (!clicked && Math.random() < 0.4) {
+        await humanScrollBy(randomBetween(120, 260));
+      }
+
+      await delay(delayMs + randomBetween(-400, 400));
 
       const currentCount = getLeadCardElements().length;
       console.log(`[IndiaMART Agent] Auto-scroll attempt ${attempt}: ${currentCount}/${minCount} cards found.`);
@@ -977,7 +1126,7 @@ import type { Lead } from './types';
       }
 
       if (currentCount <= previousCount) {
-        await delay(delayMs);
+        await delay(delayMs + randomBetween(200, 600));
       }
 
       previousCount = currentCount;
@@ -1144,7 +1293,7 @@ import type { Lead } from './types';
 
     console.debug('[IndiaMART Agent] Contact button located, preparing to submit contact flow.');
     console.debug('[IndiaMART Agent] Clicking Contact Buyer button for lead:', lead?.companyName || cardIndex);
-    clickWithFallback(contactButton, 'Contact Buyer');
+    await clickWithFallback(contactButton, 'Contact Buyer');
     console.info('[IndiaMART Agent] Clicked Contact Buyer button for lead:', lead?.companyName || cardIndex);
 
     // Wait a moment for any modal to appear (expired/consumed lead error)
@@ -1227,7 +1376,7 @@ import type { Lead } from './types';
       return { success: false, error: 'Auto-contact disabled.' };
     }
 
-    clickWithFallback(replyButton, 'Send Reply');
+    await clickWithFallback(replyButton, 'Send Reply');
 
     // Give the site a moment to register the submission
     await delay(1200);
@@ -1256,7 +1405,7 @@ import type { Lead } from './types';
         }
 
         console.debug('[IndiaMART Agent] Retrying Send Reply with fallback click support.');
-        clickWithFallback(retryButton, 'Send Reply Retry');
+        await clickWithFallback(retryButton, 'Send Reply Retry');
         await delay(1500);
         sendConfirmed = await waitForSendReplyConfirmation(6000);
       } else {
@@ -1295,6 +1444,8 @@ import type { Lead } from './types';
   const FILTER_CATEGORIES_KEY = 'indiamart_filter_categories';
   const FILTER_QUANTITY_KEY = 'indiamart_filter_quantity';
   const FILTER_ORDER_VALUE_KEY = 'indiamart_filter_order_value';
+  const DAILY_CONTACT_STATS_KEY = 'indiamart_daily_contact_stats';
+  const CONTACT_HISTORY_WINDOW_DAYS = 10;
 
   // Default filter values (used as fallback)
   const DEFAULT_ENQUIRY_KEYWORDS = [
@@ -1318,6 +1469,14 @@ import type { Lead } from './types';
   const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
   let quantityThreshold = { min: 100, unit: 'piece' };
   let orderValueMin = 50000;
+  interface DailyContactStats {
+    date: string;
+    count: number;
+    limit: number;
+    dayOfWeek: number;
+  }
+  let dailyContactStats: DailyContactStats | null = null;
+  let contactedLeadHistory: Map<string, number> = new Map();
 
   // Validation helpers
   const validateKeyword = (keyword: string): boolean => {
@@ -1327,6 +1486,146 @@ import type { Lead } from './types';
 
   const sanitizeKeyword = (keyword: string): string => {
     return keyword.trim().toLowerCase();
+  };
+
+  const getTodayIdentifier = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    return {
+      dateKey: `${year}-${month}-${day}`,
+      dayOfWeek: now.getDay(),
+    };
+  };
+
+  const determineDailyLimit = (dayOfWeek: number): number => {
+    // Sunday (0) => 6-8, Monday-Saturday => 14-18
+    return dayOfWeek === 0 ? randomIntBetween(6, 8) : randomIntBetween(14, 18);
+  };
+
+  const initializeDailyStats = (): DailyContactStats => {
+    const { dateKey, dayOfWeek } = getTodayIdentifier();
+    const stats: DailyContactStats = {
+      date: dateKey,
+      dayOfWeek,
+      count: 0,
+      limit: determineDailyLimit(dayOfWeek),
+    };
+    dailyContactStats = stats;
+    return stats;
+  };
+
+  const saveDailyContactStats = async (stats: DailyContactStats): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return;
+    }
+    await chrome.storage.local.set({ [DAILY_CONTACT_STATS_KEY]: stats });
+    chrome.runtime?.sendMessage?.({ type: 'DAILY_CONTACT_STATS', payload: stats });
+  };
+
+  const loadDailyContactStats = async (): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      dailyContactStats = initializeDailyStats();
+      return;
+    }
+
+    try {
+      const stored = await chrome.storage.local.get([DAILY_CONTACT_STATS_KEY]);
+      const stats = stored[DAILY_CONTACT_STATS_KEY] as DailyContactStats | undefined;
+      const { dateKey } = getTodayIdentifier();
+
+      if (!stats || stats.date !== dateKey) {
+        const fresh = initializeDailyStats();
+        await saveDailyContactStats(fresh);
+      } else {
+        dailyContactStats = stats;
+      }
+    } catch (error) {
+      console.error('[IndiaMART Agent] Failed to load daily contact stats:', error);
+      const fresh = initializeDailyStats();
+      await saveDailyContactStats(fresh);
+    }
+  };
+
+  const canContactMoreToday = (): boolean => {
+    if (!dailyContactStats) {
+      dailyContactStats = initializeDailyStats();
+    }
+    if (!dailyContactStats) {
+      return true;
+    }
+    if (Date.now() < backoffUntil) {
+      return false;
+    }
+    return dailyContactStats.count < dailyContactStats.limit;
+  };
+
+  const incrementDailyContactCount = async (): Promise<void> => {
+    if (!dailyContactStats) {
+      dailyContactStats = initializeDailyStats();
+    }
+    const { dateKey } = getTodayIdentifier();
+    if (dailyContactStats && dailyContactStats.date !== dateKey) {
+      dailyContactStats = initializeDailyStats();
+    }
+    if (!dailyContactStats) {
+      return;
+    }
+    dailyContactStats.count += 1;
+    console.log(
+      `[IndiaMART Agent] Daily quota usage: ${dailyContactStats.count}/${dailyContactStats.limit} (date ${dailyContactStats.date}).`
+    );
+    await saveDailyContactStats(dailyContactStats);
+  };
+
+  const notifyDailyLimitReached = () => {
+    if (!dailyContactStats) return;
+    chrome.runtime?.sendMessage?.({ type: 'DAILY_CONTACT_LIMIT_REACHED', payload: dailyContactStats });
+  };
+
+  const CONTACT_HISTORY_RETENTION_MS = CONTACT_HISTORY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+
+  const purgeStaleContactHistory = () => {
+    const cutoff = Date.now() - CONTACT_HISTORY_RETENTION_MS;
+    for (const [leadId, timestamp] of contactedLeadHistory.entries()) {
+      if (timestamp < cutoff) {
+        contactedLeadHistory.delete(leadId);
+      }
+    }
+  };
+
+  const loadContactHistory = async (): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      contactedLeadHistory = new Map();
+      return;
+    }
+    try {
+      const stored = await chrome.storage.local.get([CONTACT_SUCCESS_KEY]);
+      const entries = stored[CONTACT_SUCCESS_KEY] as ContactSuccessEntry[] | undefined;
+      contactedLeadHistory = new Map();
+      if (Array.isArray(entries)) {
+        entries.forEach((entry) => {
+          if (entry.leadId && entry.contactedAt) {
+            const ts = Date.parse(entry.contactedAt);
+            if (!Number.isNaN(ts)) {
+              contactedLeadHistory.set(entry.leadId, ts);
+            }
+          }
+        });
+      }
+      purgeStaleContactHistory();
+    } catch (error) {
+      console.error('[IndiaMART Agent] Failed to load contact history:', error);
+      contactedLeadHistory = new Map();
+    }
+  };
+
+  const wasLeadContactedRecently = (leadId?: string): boolean => {
+    if (!leadId) return false;
+    const timestamp = contactedLeadHistory.get(leadId);
+    if (!timestamp) return false;
+    return Date.now() - timestamp <= CONTACT_HISTORY_RETENTION_MS;
   };
 
   // Load filter keywords and categories from storage
@@ -1571,91 +1870,89 @@ import type { Lead } from './types';
     return { passed: true, reason: 'Meets all criteria', nextContactDelayMinutes: randomDelay };
   };
 
-  const setupPageRefresh = (immediate = false) => {
+  const selectLeadsForCycle = (leads: Lead[]): Lead[] => {
+    if (!leads.length) return [];
+    const scored = leads
+      .map((lead) => {
+        const value = lead.probableOrderValueMax ?? lead.probableOrderValueMin ?? 0;
+        return { lead, value };
+      })
+      .sort((a, b) => b.value - a.value);
+
+    if (scored.length >= 3) {
+      return [scored[1].lead, scored[2].lead];
+    }
+    if (scored.length === 2) {
+      return [scored[1].lead];
+    }
+    return [scored[0].lead];
+  };
+
+  const scheduleProcessingCycle = (immediate = false) => {
+    if (processingTimer) {
+      clearTimeout(processingTimer);
+      processingTimer = null;
+    }
     if (isStopped || !isAutoContactEnabled) {
       return;
     }
 
-    if (pageRefreshTimer) {
-      clearTimeout(pageRefreshTimer);
-      pageRefreshTimer = null;
-    }
-    
-    // Calculate delay - always enforce minimum 30 second gap between refreshes
-    const timeSinceLastRefresh = Date.now() - lastRefreshTime;
-    const minRefreshGap = REFRESH_INTERVAL;
-    
-    let refreshDelay: number;
-    if (immediate) {
-      // Even for "immediate" refresh, ensure at least 30 seconds have passed
-      refreshDelay = Math.max(0, minRefreshGap - timeSinceLastRefresh);
-    } else {
-      // For regular refresh, always use 30 seconds
-      refreshDelay = REFRESH_INTERVAL;
-    }
-    
-    // If a refresh was just done, ensure we wait the full interval
-    if (timeSinceLastRefresh > 0 && timeSinceLastRefresh < minRefreshGap) {
-      refreshDelay = minRefreshGap - timeSinceLastRefresh;
-    }
-    
-    console.log(`[IndiaMART Agent] Scheduling page refresh in ${(refreshDelay / 1000).toFixed(1)} seconds`);
-    
-    pageRefreshTimer = setTimeout(() => {
+    const delayMs = immediate ? randomBetween(3000, 8000) : getStealthDelayMs();
+    lastScheduledProcessingWindow = `${(delayMs / 60000).toFixed(2)}m`;
+    console.log(
+      `[IndiaMART Agent] Next processing cycle in ${lastScheduledProcessingWindow}.`
+    );
+
+    processingTimer = setTimeout(async () => {
+      processingTimer = null;
       if (!isStopped && isAutoContactEnabled) {
-        lastRefreshTime = Date.now();
-        console.log('IndiaMART Agent: Refreshing page...');
-        window.location.reload();
+        try {
+          await processLeadsWithFiltering();
+        } catch (error) {
+          console.error('[IndiaMART Agent] Processing cycle failed:', error);
+          registerAutomationError((error as Error)?.message || 'Processing cycle failed');
+        }
       }
-    }, refreshDelay);
+      scheduleProcessingCycle();
+    }, delayMs);
   };
-  
-  // Setup periodic processing every 30 seconds to save logs regularly
+
+  // Setup periodic processing with stealth scheduling
   const setupPeriodicProcessing = () => {
     if (isStopped || !isAutoContactEnabled) {
       return;
     }
-    
-    // Clear any existing interval to avoid duplicates
-    if (periodicProcessInterval) {
-      clearInterval(periodicProcessInterval);
-      periodicProcessInterval = null;
-    }
-    
-    // Process leads every 30 seconds to ensure logs are saved regularly
-    console.log('[IndiaMART Agent] Setting up periodic processing - will process and save logs every 30 seconds');
-    periodicProcessInterval = setInterval(() => {
-      if (!isStopped && isAutoContactEnabled) {
-        const timeSinceLastProcessing = Date.now() - lastProcessingTime;
-        if (timeSinceLastProcessing >= REFRESH_INTERVAL - 5000) { // Process if 25+ seconds have passed
-          console.log('[IndiaMART Agent] Periodic processing - processing leads and saving logs (runs regardless of tab visibility)...');
-          processLeadsWithFiltering();
-        }
-      }
-    }, REFRESH_INTERVAL);
+    scheduleProcessingCycle(true);
   };
 
-  // Setup automatic refresh every 30 seconds when auto-contact is enabled
-  const setupPeriodicRefresh = () => {
-    if (isStopped || !isAutoContactEnabled) {
-      return;
-    }
-    
-    // Clear any existing timer to avoid duplicates
+  const scheduleRefreshCycle = () => {
     if (pageRefreshTimer) {
       clearTimeout(pageRefreshTimer);
       pageRefreshTimer = null;
     }
-    
-    // Schedule refresh in 30 seconds
-    console.log('[IndiaMART Agent] Setting up periodic refresh - will refresh in 30 seconds');
+    if (isStopped || !isAutoContactEnabled) {
+      return;
+    }
+
+    const delayMs = getStealthDelayMs();
+    lastScheduledRefreshWindow = `${(delayMs / 60000).toFixed(2)}m`;
+    console.log(`[IndiaMART Agent] Next refresh scheduled in ${lastScheduledRefreshWindow}.`);
+
     pageRefreshTimer = setTimeout(() => {
       if (!isStopped && isAutoContactEnabled) {
         lastRefreshTime = Date.now();
-        console.log('IndiaMART Agent: Periodic refresh - refreshing page now...');
+        console.log('IndiaMART Agent: Stealth refresh triggered.');
         window.location.reload();
       }
-    }, REFRESH_INTERVAL);
+    }, delayMs);
+  };
+
+  // Setup automatic refresh using stealth schedule
+  const setupPeriodicRefresh = () => {
+    if (isStopped || !isAutoContactEnabled) {
+      return;
+    }
+    scheduleRefreshCycle();
   };
 
   const processFilteredLead = async (lead: Lead, cardIndex: number): Promise<boolean> => {
@@ -1689,8 +1986,12 @@ import type { Lead } from './types';
           
           return true;
         }
+        if (result.error) {
+          registerAutomationError(result.error);
+        }
       } catch (error) {
         console.error('Error contacting lead:', error);
+        registerAutomationError((error as Error)?.message || 'Unknown contact flow error');
       }
       
       return false;
@@ -1707,7 +2008,7 @@ import type { Lead } from './types';
   const MAX_LOG_LINES = 1000; // Maximum number of diagnostic log lines to keep
   const MAX_SUMMARIES = 20; // keep last N summaries
   const MAX_LEAD_LOGS = 20; // keep last N detailed log blocks
-  const MAX_CONTACT_SUCCESS = 50; // keep last N successful contacts
+  const MAX_CONTACT_SUCCESS = 200; // keep last N successful contacts (extended for 10-day tracking)
   const DIAGNOSTICS_ENABLED = false; // default off
 
   const LAST_SIGNATURE_KEY = 'indiamart_last_signature';
@@ -1725,6 +2026,19 @@ import type { Lead } from './types';
     location?: string;
     contactedAt: string;
     probableOrderValue?: string;
+  }
+
+  interface CycleSummaryMeta {
+    timestamp: string;
+    totalLeads: number;
+    qualifiedLeads: number;
+    selectedLeads: Array<{ id?: string; company?: string; orderValue?: string }>;
+    skippedLeads: number;
+    dailyStats: DailyContactStats | null;
+    buyLeadBalance?: number;
+    actions: string[];
+    errors: string[];
+    backoffActive: boolean;
   }
 
   const formatOrderValueRange = (lead: Lead): string | undefined => {
@@ -1765,6 +2079,10 @@ import type { Lead } from './types';
 
       const updated = [...withoutDuplicate, entry].slice(-MAX_CONTACT_SUCCESS);
       await chrome.storage.local.set({ [CONTACT_SUCCESS_KEY]: updated });
+      if (entry.leadId) {
+        contactedLeadHistory.set(entry.leadId, Date.now());
+        purgeStaleContactHistory();
+      }
 
       if (chrome.runtime?.sendMessage) {
         chrome.runtime.sendMessage({ type: 'CONTACT_SUCCESS_UPDATED', entry });
@@ -1779,7 +2097,9 @@ import type { Lead } from './types';
     filteredLeadsCount: number,
     rejectedLeads: number,
     filteredLeads: Lead[],
-    evaluations: LeadEvaluation[]
+    evaluations: LeadEvaluation[],
+    selectedLeads: Lead[],
+    cycleSummary: CycleSummaryMeta
   ): Promise<void> => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) {
       console.warn('[IndiaMART Agent] Chrome storage API not available');
@@ -1805,7 +2125,10 @@ import type { Lead } from './types';
           id: entry.lead.leadId,
           passed: entry.passed,
           reason: entry.reason
-        }))
+        })),
+        selected: selectedLeads.map((lead) => lead.leadId),
+        actions: cycleSummary.actions,
+        errors: cycleSummary.errors
       };
       const signature = JSON.stringify(signaturePayload);
 
@@ -1830,6 +2153,7 @@ import type { Lead } from './types';
       logEntries.push(`[${timestamp}] [IndiaMART Agent] Total leads: ${totalLeads}`);
       logEntries.push(`[${timestamp}] [IndiaMART Agent] Filtered (qualified) leads: ${filteredLeadsCount}`);
       logEntries.push(`[${timestamp}] [IndiaMART Agent] Rejected leads: ${rejectedLeads}`);
+      logEntries.push(`[${timestamp}] [IndiaMART Agent] Selected this cycle: ${selectedLeads.length}`);
       
       if (filteredLeads.length > 0) {
         logEntries.push(`[${timestamp}] [IndiaMART Agent] Filtered leads list:`);
@@ -1838,6 +2162,35 @@ import type { Lead } from './types';
         });
       } else {
         logEntries.push(`[${timestamp}] [IndiaMART Agent] Filtered leads list: Array(0)`);
+      }
+
+      if (selectedLeads.length > 0) {
+        logEntries.push(`[${timestamp}] [IndiaMART Agent] Selected leads this cycle:`);
+        selectedLeads.forEach((lead, index) => {
+          logEntries.push(
+            `[${timestamp}] [IndiaMART Agent]   ${index + 1}. ${lead.companyName} — ${formatOrderValueRange(lead) || 'N/A'}`
+          );
+        });
+      }
+
+      if (cycleSummary.dailyStats) {
+        logEntries.push(
+          `[${timestamp}] [IndiaMART Agent] Daily quota: ${cycleSummary.dailyStats.count}/${cycleSummary.dailyStats.limit}`
+        );
+      }
+
+      if (typeof cycleSummary.buyLeadBalance === 'number') {
+        logEntries.push(
+          `[${timestamp}] [IndiaMART Agent] Remaining buy lead balance (estimate): ${cycleSummary.buyLeadBalance}`
+        );
+      }
+
+      if (cycleSummary.actions.length) {
+        logEntries.push(`[${timestamp}] [IndiaMART Agent] Actions: ${cycleSummary.actions.join(' | ')}`);
+      }
+
+      if (cycleSummary.errors.length) {
+        logEntries.push(`[${timestamp}] [IndiaMART Agent] Errors: ${cycleSummary.errors.join(' | ')}`);
       }
       
       logEntries.push(`[${timestamp}] [IndiaMART Agent] URL: ${window.location.href}`);
@@ -1897,148 +2250,196 @@ import type { Lead } from './types';
       lastProcessingTime = Date.now();
       return;
     }
-    
-    // Wait for filter config to load before processing
+
     if (!filterConfigLoaded) {
       lastProcessingTime = Date.now();
       console.log('[IndiaMART Agent] ⏳ Waiting for filter config to load before processing leads...');
       return;
     }
-    
+
     if (isLeadProcessingRunning) {
       lastProcessingTime = Date.now();
       console.debug('[IndiaMART Agent] Skipping processLeadsWithFiltering - already running.');
       return;
     }
-    
+
+    if (!dailyContactStats) {
+      await loadDailyContactStats();
+    }
+
     isLeadProcessingRunning = true;
     lastProcessingTime = Date.now();
-    
+
     try {
+      if (lastRefreshTime > 0 && Date.now() - lastRefreshTime < 8000) {
+        const waitMs = randomBetween(3000, 8000);
+        console.log(
+          `[IndiaMART Agent] Waiting ${(waitMs / 1000).toFixed(
+            1
+          )}s after refresh before scanning leads.`
+        );
+        await delay(waitMs);
+      }
+
       await ensureMinimumLeadCards(MIN_LEAD_TARGET);
       const leads = scrapeLeads();
+      const skipIndexes = pickRandomSkipIndexes(leads.length);
       const filteredLeads: Lead[] = [];
       const leadEvaluations: LeadEvaluation[] = [];
-      const contactsToProcess: Lead[] = [];
-      
-      // Reset counters for this batch
+      const cycleErrors: string[] = [];
+      const cycleActions: string[] = [];
+      const cycleTimestamp = new Date().toISOString();
       filteredLeadsCount = 0;
       contactedLeadsCount = 0;
       pendingContacts = [];
-      
-      console.log('[IndiaMART Agent] Processing leads with filtering...');
+
+      console.log('[IndiaMART Agent] Processing leads with stealth filtering...');
       console.log('[IndiaMART Agent] Total leads to process:', leads.length);
-      console.log('[IndiaMART Agent] Using filter arrays from storage:', {
-        keywordsCount: enquiryKeywords.length,
-        categoriesCount: allowedCategories.length,
-        firstFewKeywords: enquiryKeywords.slice(0, 5),
-        firstFewCategories: allowedCategories.slice(0, 5)
-      });
-      
-      // Apply filtering
-      for (const lead of leads) {
+
+      for (const [index, lead] of leads.entries()) {
         if (processedLeads.has(lead.leadId)) {
           console.log(`[IndiaMART Agent] Skipping already processed lead: ${lead.companyName}`);
-          continue; // Skip already processed
+          continue;
         }
 
-        // Check if lead is in skip list (expired/consumed leads)
-        if (isLeadSkipped(lead.leadId)) {
-          console.log(`[IndiaMART Agent] ⏭️ Skipping expired/consumed lead: ${lead.companyName} (${lead.leadId})`);
-          leadEvaluations.push({ 
-            lead, 
-            passed: false, 
-            reason: 'Lead expired or already consumed by maximum permissible sellers (in skip list)' 
+        if (skipIndexes.has(index)) {
+          leadEvaluations.push({
+            lead,
+            passed: false,
+            reason: 'Skipped for human-like browsing cadence',
           });
-          continue; // Skip expired/consumed leads
+          continue;
         }
-        
+
+        await applyReadingDelay(lead);
+
+        if (wasLeadContactedRecently(lead.leadId)) {
+          leadEvaluations.push({
+            lead,
+            passed: false,
+            reason: 'Contacted within last 10 days (duplicate guard)',
+          });
+          continue;
+        }
+
+        if (isLeadSkipped(lead.leadId)) {
+          leadEvaluations.push({
+            lead,
+            passed: false,
+            reason: 'Lead expired/consumed previously (skip list)',
+          });
+          continue;
+        }
+
         const filterResult = applyIntelligentFilter(lead);
         lead.passedFilter = filterResult.passed;
         lead.filterReason = filterResult.reason;
         lead.nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
         leadEvaluations.push({ lead, passed: filterResult.passed, reason: filterResult.reason });
-        
+
         console.log(`[IndiaMART Agent] Lead: ${lead.companyName}`);
         console.log(`  - Filter passed: ${filterResult.passed}`);
         console.log(`  - Reason: ${filterResult.reason}`);
-        console.log(`  - Details:`, {
-          enquiryTitle: lead.enquiryTitle,
-          location: lead.location,
-          quantity: lead.quantity,
-          category: lead.category,
-          orderValue: `₹${lead.probableOrderValueMin || 0} - ₹${lead.probableOrderValueMax || 0}`
-        });
-        
+
         if (filterResult.passed) {
           filteredLeads.push(lead);
-          contactsToProcess.push(lead);
-          pendingContacts.push(lead);
-          filteredLeadsCount++;
         }
       }
-      
-      // Send filtered data to popup
+
+      filteredLeadsCount = filteredLeads.length;
+      const contactAllowed = canContactMoreToday();
+      const selectedLeads = contactAllowed ? selectLeadsForCycle(filteredLeads) : [];
+      pendingContacts = [...selectedLeads];
+
+      if (!selectedLeads.length) {
+        if (!contactAllowed) {
+          cycleActions.push('Daily quota reached. Cycle limited to monitoring only.');
+          notifyDailyLimitReached();
+        } else {
+          cycleActions.push('No leads selected this cycle (insufficient qualified leads).');
+        }
+      } else {
+        for (const lead of selectedLeads) {
+          if (isStopped || !isAutoContactEnabled) {
+            break;
+          }
+          if (!canContactMoreToday()) {
+            cycleActions.push('Daily quota met mid-cycle. Remaining leads deferred.');
+            notifyDailyLimitReached();
+            break;
+          }
+
+          const contacted = await processFilteredLead(lead, lead.cardIndex || 0);
+          if (contacted) {
+            await incrementDailyContactCount();
+            contactedLeadHistory.set(lead.leadId, Date.now());
+            purgeStaleContactHistory();
+            clearAutomationErrors();
+            cycleActions.push(`Contacted ${lead.companyName || lead.leadId}`);
+            if (!canContactMoreToday()) {
+              notifyDailyLimitReached();
+              break;
+            }
+          } else {
+            const errMsg = `Failed to contact ${lead.companyName || lead.leadId}`;
+            cycleErrors.push(errMsg);
+            registerAutomationError(errMsg);
+          }
+
+          if (typeof lead.nextContactDelayMinutes === 'number' && lead.nextContactDelayMinutes > 0) {
+            await delay(lead.nextContactDelayMinutes * 60 * 1000);
+          } else {
+            await delay(randomBetween(1000, 3000));
+          }
+        }
+      }
+
+      const buyLeadBalance = getBuyLeadBalanceEstimate();
+      const cycleSummary = {
+        timestamp: cycleTimestamp,
+        totalLeads: leads.length,
+        qualifiedLeads: filteredLeads.length,
+        selectedLeads: selectedLeads.map((lead) => ({
+          id: lead.leadId,
+          company: lead.companyName,
+          orderValue: formatOrderValueRange(lead) || 'N/A',
+        })),
+        skippedLeads: skipIndexes.size,
+        dailyStats: dailyContactStats,
+        buyLeadBalance,
+        actions: cycleActions,
+        errors: cycleErrors,
+        backoffActive: Date.now() < backoffUntil,
+      };
+
       chrome.runtime.sendMessage({
         type: 'FILTERED_LEADS_DATA',
         payload: {
           allLeads: leads,
-          filteredLeads: filteredLeads,
-        autoContactEnabled: isAutoContactEnabled,
-        filters: getFilterCriteria()
-        }
+          filteredLeads,
+          autoContactEnabled: isAutoContactEnabled,
+          filters: getFilterCriteria(),
+          cycleSummary,
+        },
       });
-      
+
       console.log('[IndiaMART Agent] ========== FILTERING SUMMARY ==========');
       console.log(`[IndiaMART Agent] Total leads: ${leads.length}`);
       console.log(`[IndiaMART Agent] Filtered (qualified) leads: ${filteredLeadsCount}`);
-      console.log(`[IndiaMART Agent] Rejected leads: ${leads.length - filteredLeadsCount}`);
-      console.log('[IndiaMART Agent] Filtered leads list:', filteredLeads.map(l => ({
-        company: l.companyName,
-        enquiry: l.enquiryTitle,
-        location: l.location
-      })));
-      
-      // Save filtering summary to Chrome storage
+      console.log(`[IndiaMART Agent] Selected for contact this cycle: ${selectedLeads.length}`);
+
       await saveFilteringSummaryToStorage(
         leads.length,
         filteredLeadsCount,
         leads.length - filteredLeadsCount,
         filteredLeads,
-        leadEvaluations
+        leadEvaluations,
+        selectedLeads,
+        cycleSummary
       );
-      
-      // Notify popup/background that logs were updated
       try {
-        if (typeof chrome !== 'undefined' && chrome.runtime?.sendMessage) {
-          chrome.runtime.sendMessage({ type: 'LOGS_UPDATED' });
-        }
+        chrome.runtime?.sendMessage?.({ type: 'LOGS_UPDATED' });
       } catch {}
-      
-      // Only schedule refresh + periodic processing when auto-contact is active
-      if (isAutoContactEnabled && !isStopped) {
-        setupPeriodicRefresh(); // Refresh page every 30 seconds while auto-contact runs
-        setupPeriodicProcessing(); // Process and save logs every 30 seconds
-      }
-      
-      // Decide on refresh strategy for specific cases
-      if (filteredLeadsCount === 0) {
-        if (isAutoContactEnabled && !isStopped) {
-          console.log('No filtered leads found. Periodic refresh already scheduled.');
-        } else {
-          console.log('No filtered leads found. Auto-contact disabled, no refresh scheduled.');
-        }
-      } else if (isAutoContactEnabled && !isStopped) {
-        for (const lead of contactsToProcess) {
-          if (isStopped || !isAutoContactEnabled) {
-            break;
-          }
-          const contacted = await processFilteredLead(lead, lead.cardIndex || 0);
-          if (contacted && typeof lead.nextContactDelayMinutes === 'number' && lead.nextContactDelayMinutes > 0) {
-            await delay(lead.nextContactDelayMinutes * 60 * 1000);
-          }
-        }
-      }
     } finally {
       isLeadProcessingRunning = false;
     }
@@ -2252,7 +2653,7 @@ import type { Lead } from './types';
   };
   
   // Initialize: Load filter config and skipped leads from storage, then start observers
-  void Promise.all([loadFilterConfig(), loadSkippedLeads()])
+  void Promise.all([loadFilterConfig(), loadSkippedLeads(), loadDailyContactStats(), loadContactHistory()])
     .then(() => {
       console.log('[IndiaMART Agent] Filter config and skipped leads initialized from storage');
       startZeroBalanceObserver();
