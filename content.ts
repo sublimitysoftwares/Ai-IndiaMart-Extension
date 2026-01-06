@@ -50,9 +50,9 @@ import type { Lead } from './types';
   const WORKING_REFRESH_RANGE_MINUTES = { min: 5, max: 15 };
   const OFF_HOURS_REFRESH_RANGE_MINUTES = { min: 65, max: 90 };
   const MIN_LEAD_TARGET = 50; // desired minimum number of leads before processing
-  const AUTO_SCROLL_MAX_ATTEMPTS = 8;
-  const AUTO_SCROLL_DELAY_MS = 1200;
-  const AUTO_SCROLL_COOLDOWN_MS = 60 * 1000;
+  const AUTO_SCROLL_MAX_ATTEMPTS = 500; // Significantly increased to ensure reaching 50 leads
+  const AUTO_SCROLL_DELAY_MS = 1000; // 1 second per lead scrolling speed (target: 50 leads)
+  const AUTO_SCROLL_COOLDOWN_MS = 5 * 1000; // Reduced to 5 seconds to allow more frequent scrolling
   const DEFAULT_CONTACT_MESSAGE = `Hello,\n\nWe supply premium-quality uniforms and would love to support your requirement. Please let us know the sizes and timelines so we can share the best quote.\n\nThanks,\nTeam IndiaMART Agent`;
   const SKIPPED_LEADS_KEY = 'indiamart_skipped_leads'; // Storage key for skipped lead IDs
   
@@ -124,16 +124,12 @@ import type { Lead } from './types';
     isWorkingHours ? '09:00-21:00' : '21:00-09:00';
 
   const getStealthDelayMs = (): number => {
-    const now = new Date();
-    const hour = now.getHours();
-    const isWorkingHours = hour >= WORKING_HOURS.start && hour < WORKING_HOURS.end;
-    const range = isWorkingHours ? WORKING_REFRESH_RANGE_MINUTES : OFF_HOURS_REFRESH_RANGE_MINUTES;
-    const delayMinutes = randomBetween(range.min, range.max);
-    const descriptor = describeScheduleWindow(isWorkingHours);
+    // Fixed 30 second refresh interval
+    const delaySeconds = 30;
     console.log(
-      `[IndiaMART Agent] Scheduling next stealth window (${descriptor}) in ${delayMinutes.toFixed(2)} minutes.`
+      `[IndiaMART Agent] Scheduling next refresh in ${delaySeconds} seconds.`
     );
-    return delayMinutes * 60 * 1000;
+    return delaySeconds * 1000; // 30 seconds in milliseconds
   };
 
   const registerAutomationError = (reason: string) => {
@@ -252,18 +248,16 @@ import type { Lead } from './types';
   };
 
   const humanScrollBy = async (distance: number): Promise<void> => {
-    window.scrollBy({ top: distance, behavior: 'smooth' });
+    window.scrollBy({ top: distance, behavior: 'auto' });
     simulateMouseMove();
-    await delay(randomBetween(500, 1200));
+    await delay(500); // Fixed 500ms delay for consistent 1 second per lead timing
   };
 
-  const performHumanScrollPass = async (direction: 'down' | 'up'): Promise<void> => {
-    const steps = randomIntBetween(3, 7);
-    for (let i = 0; i < steps; i++) {
-      const distance = randomBetween(80, 220) * (direction === 'down' ? 1 : -1);
-      await humanScrollBy(distance);
-      await delay(randomBetween(500, 2500));
-    }
+  const performHumanScrollPass = async (): Promise<void> => {
+    // 1 second per lead scrolling - much larger distances to ensure reaching 50 leads
+    const distance = randomBetween(700, 1000); // Much larger scroll distance to cover more ground efficiently
+    await humanScrollBy(distance);
+    await delay(500); // Fixed 500ms delay to maintain 1 second per lead
   };
 
   const pickRandomSkipIndexes = (total: number): Set<number> => {
@@ -421,17 +415,28 @@ import type { Lead } from './types';
     }
   };
 
-  const locateContactButton = (card: Element): HTMLElement | null => {
+  const locateContactButton = (card: Element | null, searchDocument: boolean = false): HTMLElement | null => {
     const selectors = [
       'button',
       'a',
       '.btnCBN',
       '.btnCBN1',
       '[data-action="contact"]',
-      '[onclick*="contactbuyernow"]'
+      '[onclick*="contactbuyernow"]',
+      '[onclick*="contact"]',
+      'button[type="button"]',
+      'a[class*="btn"]',
+      'button[class*="btn"]',
+      '[role="button"]'
     ];
 
-    const contexts = [card, ...getInteractionContexts()];
+    // If searchDocument is true, prioritize document-wide search (for detail pages)
+    const contexts = searchDocument 
+      ? [document, ...getInteractionContexts(), card].filter(Boolean)
+      : card 
+        ? [card, ...getInteractionContexts()]
+        : [document, ...getInteractionContexts()];
+
     for (const context of contexts) {
       if (
         !(context instanceof Document) &&
@@ -444,8 +449,24 @@ import type { Lead } from './types';
       for (const selector of selectors) {
         const candidates = context.querySelectorAll<HTMLElement>(selector);
         for (const candidate of candidates) {
-          const label = candidate.textContent?.trim().toLowerCase() || '';
-          if (!label.includes('contact buyer')) continue;
+          const label = (candidate.textContent?.trim() || '').toLowerCase();
+          const ariaLabel = (candidate.getAttribute('aria-label') || '').toLowerCase();
+          const title = (candidate.getAttribute('title') || '').toLowerCase();
+          
+          // More flexible text matching for "Contact Buyer Now" button
+          const contactBuyerPatterns = [
+            'contact buyer',
+            'contact buyer now',
+            'contactbuyernow',
+            'contact buyernow',
+            'contactbuyer'
+          ];
+          
+          const matchesPattern = contactBuyerPatterns.some(pattern => 
+            label.includes(pattern) || ariaLabel.includes(pattern) || title.includes(pattern)
+          );
+          
+          if (!matchesPattern) continue;
           if (isElementVisible(candidate)) {
             return candidate;
           }
@@ -1060,12 +1081,28 @@ import type { Lead } from './types';
   };
 
   const attemptClickLoadMore = (): boolean => {
+    // First, search for "SHOW MORE BUYLEADS" button by text (case-insensitive)
+    const allButtons = document.querySelectorAll<HTMLElement>('button, a[role="button"], [role="button"]');
+    for (const btn of allButtons) {
+      const btnText = (btn.textContent || '').trim().toUpperCase();
+      if (btnText.includes('SHOW MORE BUYLEADS') || btnText.includes('SHOW MORE BUY LEADS')) {
+        if (isElementVisible(btn) && !btn.getAttribute('aria-disabled')) {
+          btn.scrollIntoView({ behavior: 'auto', block: 'center' });
+          btn.click();
+          console.log(`[IndiaMART Agent] ✅ Clicked "SHOW MORE BUYLEADS" button found by text search.`);
+          return true;
+        }
+      }
+    }
+
+    // Fallback: Try selectors
     const selectors = [
       'button.load-more',
       'button.loadMore',
       'button[data-testid*="load"]',
       'button[data-action*="load"]',
       '[role="button"][aria-label*="Load"]',
+      '[role="button"][aria-label*="Show More"]',
       '.loadMoreBtn',
       '.view-more',
       '.showMore',
@@ -1073,13 +1110,28 @@ import type { Lead } from './types';
     ];
     for (const selector of selectors) {
       const btn = document.querySelector<HTMLElement>(selector);
-      if (btn && !btn.getAttribute('aria-disabled')) {
+      if (btn && isElementVisible(btn) && !btn.getAttribute('aria-disabled')) {
+        btn.scrollIntoView({ behavior: 'auto', block: 'center' });
         btn.click();
         console.log(`[IndiaMART Agent] Auto-scroll clicked potential load-more button via selector "${selector}".`);
         return true;
       }
     }
     return false;
+  };
+
+  const findShowMoreButton = (): HTMLElement | null => {
+    // Search for "SHOW MORE BUYLEADS" button by text (case-insensitive)
+    const allButtons = document.querySelectorAll<HTMLElement>('button, a[role="button"], [role="button"]');
+    for (const btn of allButtons) {
+      const btnText = (btn.textContent || '').trim().toUpperCase();
+      if ((btnText.includes('SHOW MORE BUYLEADS') || btnText.includes('SHOW MORE BUY LEADS')) && 
+          isElementVisible(btn) && 
+          !btn.getAttribute('aria-disabled')) {
+        return btn;
+      }
+    }
+    return null;
   };
 
   const ensureMinimumLeadCards = async (
@@ -1093,47 +1145,147 @@ import type { Lead } from './types';
     }
 
     const now = Date.now();
-    if (now - lastAutoScrollRun < AUTO_SCROLL_COOLDOWN_MS) {
+    // Remove cooldown restriction - allow continuous scrolling to reach 50 leads
+    // Only apply cooldown if we've already reached the target
+    if (existing >= minCount && now - lastAutoScrollRun < AUTO_SCROLL_COOLDOWN_MS) {
       return;
     }
     lastAutoScrollRun = now;
 
     console.log(`[IndiaMART Agent] Auto-scroll: need at least ${minCount} lead cards (currently ${existing}).`);
 
+    const startTime = Date.now();
+    const MAX_SCROLL_TIME_MS = 300000; // 300 second (5 minute) timeout to reach 50 leads
     let attempt = 0;
     let previousCount = existing;
+    let noProgressCount = 0; // Track consecutive attempts with no progress
+
+    let showMoreButtonFound = false;
+    let showMoreButtonClicked = false;
 
     while (attempt < maxAttempts) {
+      // Check timeout: if 5 minutes elapsed, break to avoid infinite scrolling
+      if (Date.now() - startTime > MAX_SCROLL_TIME_MS) {
+        console.log(`[IndiaMART Agent] Auto-scroll timeout reached. Current cards: ${getLeadCardElements().length}`);
+        break;
+      }
+
       attempt += 1;
 
-      await performHumanScrollPass('down');
-      if (Math.random() < 0.35) {
-        await performHumanScrollPass('up');
+      // Check for "SHOW MORE BUYLEADS" button - this is our target
+      const showMoreBtn = findShowMoreButton();
+      if (showMoreBtn && !showMoreButtonFound) {
+        showMoreButtonFound = true;
+        console.log(`[IndiaMART Agent] ✅ Found "SHOW MORE BUYLEADS" button! Scrolling to it and clicking...`);
       }
 
+      // If we found the button, scroll to it and click
+      if (showMoreBtn && !showMoreButtonClicked) {
+        showMoreBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
+        await delay(1000); // Wait for scroll to complete
+        showMoreBtn.click();
+        showMoreButtonClicked = true;
+        console.log(`[IndiaMART Agent] ✅ Clicked "SHOW MORE BUYLEADS" button! Waiting for new leads to load...`);
+        await delay(3000); // Wait longer for new leads to load after clicking
+        // Reset counters after clicking to continue checking for more leads
+        previousCount = getLeadCardElements().length;
+        noProgressCount = 0;
+        continue; // Continue scrolling after clicking
+      }
+
+      // Scroll to absolute bottom more frequently to ensure we're loading all content
+      if (attempt % 3 === 0) {
+        const scrollHeight = Math.max(
+          document.documentElement.scrollHeight,
+          document.body.scrollHeight
+        );
+        window.scrollTo({ top: scrollHeight, behavior: 'auto' });
+        console.log(`[IndiaMART Agent] Scrolling to absolute bottom (${scrollHeight}px) on attempt ${attempt}`);
+        await delay(2000); // Wait longer for content to load after scrolling to bottom
+      }
+
+      // 1 second per lead scrolling: always scroll down, no random checks
+      await performHumanScrollPass();
+
+      // Try clicking "Load More" button (fallback - in case button text changes)
       const clicked = attemptClickLoadMore();
-      if (!clicked && Math.random() < 0.4) {
-        await humanScrollBy(randomBetween(120, 260));
+      if (clicked && !showMoreButtonFound) {
+        console.log(`[IndiaMART Agent] "Load More" button clicked, waiting for content to load...`);
+        await delay(2000); // Wait longer after clicking Load More
       }
 
-      await delay(delayMs + randomBetween(-400, 400));
+      // Always scroll down after checking for load more button - larger distances
+      await humanScrollBy(randomBetween(700, 1000)); // Much larger scroll distance to ensure reaching 50 leads
+
+      // Scroll even more to ensure we're past any lazy-loading thresholds
+      await humanScrollBy(randomBetween(400, 600));
+      
+      // Additional scroll pass for maximum coverage
+      await humanScrollBy(randomBetween(200, 400));
+
+      // 1 second delay between attempts (approximately 1 second per lead)
+      await delay(delayMs); // Fixed 1 second delay
+
+      // Wait longer for any dynamically loaded content to ensure leads are detected
+      await delay(800);
 
       const currentCount = getLeadCardElements().length;
       console.log(`[IndiaMART Agent] Auto-scroll attempt ${attempt}: ${currentCount}/${minCount} cards found.`);
 
-      if (currentCount >= minCount) {
+      // Check again for "SHOW MORE BUYLEADS" button - it might appear after scrolling
+      const newShowMoreBtn = findShowMoreButton();
+      if (newShowMoreBtn && !showMoreButtonFound) {
+        // Found the button, will be handled in next iteration
+        continue;
+      }
+
+      // If we already clicked the button and no new button appears, check if we reached target
+      if (showMoreButtonClicked && !newShowMoreBtn) {
+        if (currentCount >= minCount) {
+          console.log(`[IndiaMART Agent] ✅ Reached target of ${minCount} leads after clicking "SHOW MORE BUYLEADS"!`);
+          break;
+        }
+        // Button was clicked but we haven't reached target - continue scrolling
+        console.log(`[IndiaMART Agent] "SHOW MORE BUYLEADS" button was clicked, but only ${currentCount}/${minCount} leads found. Continuing to scroll...`);
+      } else if (currentCount >= minCount && !showMoreButtonFound) {
+        // Reached target before finding button
+        console.log(`[IndiaMART Agent] ✅ Reached target of ${minCount} leads!`);
         break;
       }
 
-      if (currentCount <= previousCount) {
-        await delay(delayMs + randomBetween(200, 600));
+      // Track progress - continue scrolling even if no progress for a while
+      if (currentCount > previousCount) {
+        console.log(`[IndiaMART Agent] Progress: ${previousCount} → ${currentCount} leads`);
+        noProgressCount = 0; // Reset no progress counter
+      } else {
+        noProgressCount++;
+        // Only warn if no progress for many attempts, but keep scrolling
+        if (noProgressCount > 5 && noProgressCount % 3 === 0) {
+          console.log(`[IndiaMART Agent] ⚠️ No progress for ${noProgressCount} attempts, scrolling to bottom to trigger loading...`);
+          // Try scrolling to bottom again if no progress - more aggressive
+          const scrollHeight = Math.max(
+            document.documentElement.scrollHeight,
+            document.body.scrollHeight
+          );
+          window.scrollTo({ top: scrollHeight, behavior: 'auto' });
+          await delay(2500); // Wait for content to load
+          // Scroll a bit more after reaching bottom
+          await humanScrollBy(randomBetween(500, 800));
+          await delay(1500);
+        }
       }
 
       previousCount = currentCount;
     }
 
     const finalCount = getLeadCardElements().length;
-    console.log(`[IndiaMART Agent] Auto-scroll completed after ${attempt} attempts. Total cards available: ${finalCount}.`);
+    const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`[IndiaMART Agent] Auto-scroll completed after ${attempt} attempts in ${elapsedTime}s. Total cards available: ${finalCount}.`);
+    
+    // Don't refresh immediately - wait for 30 second refresh cycle
+    if (finalCount >= minCount && isAutoContactEnabled && !isStopped) {
+      console.log(`[IndiaMART Agent] ✅ Target of ${minCount} leads reached! Will continue until next 30-second refresh cycle.`);
+    }
   };
 
   const buildLeadId = (card: Element, index: number, title: string, timestamp: string): string => {
@@ -1264,22 +1416,97 @@ import type { Lead } from './types';
       return { success: false, error: 'Auto-contact disabled.' };
     }
 
+    console.log(`[IndiaMART Agent] 🔄 Starting contact flow for lead: ${lead?.companyName || 'N/A'}, CardIndex: ${cardIndex}`);
+    
+    // Get cards and find the right card
     const cards = getLeadCardElements();
-    const card = cards[cardIndex];
-    if (!card) {
-      return { success: false, error: `Lead card at index ${cardIndex} not found.` };
+    console.log(`[IndiaMART Agent] Found ${cards.length} lead cards on page`);
+    
+    let card = cards[cardIndex];
+    
+    // If card not found by index, try to find by matching lead data
+    if (!card && lead) {
+      console.log(`[IndiaMART Agent] Card not found at index ${cardIndex}, trying to find by lead data...`);
+      for (let i = 0; i < cards.length; i++) {
+        const testCard = cards[i];
+        const cardText = (testCard.textContent || '').toLowerCase();
+        const enquiryTitleLower = (lead.enquiryTitle || '').toLowerCase();
+        const companyNameLower = (lead.companyName || '').toLowerCase();
+        
+        // Match by enquiry title or company name
+        if ((enquiryTitleLower && cardText.includes(enquiryTitleLower)) ||
+            (companyNameLower && cardText.includes(companyNameLower))) {
+          card = testCard;
+          console.log(`[IndiaMART Agent] ✅ Found card at index ${i} by matching lead data`);
+          break;
+        }
+      }
+    }
+    
+    // Detect if we're on a detail page (no cards found or card not available)
+    const isDetailPage = !card || cards.length === 0;
+    
+    if (isDetailPage) {
+      console.log('[IndiaMART Agent] Detected detail page - using document-wide button search');
     }
 
-    if (card instanceof HTMLElement) {
+    // Scroll card into view if it exists, otherwise scroll to top
+    if (card && card instanceof HTMLElement) {
+      console.log(`[IndiaMART Agent] Scrolling card into view...`);
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      await delay(1000); // Wait for scroll to complete
+    } else if (isDetailPage) {
+      // On detail pages, scroll to top to ensure button visibility
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      await delay(1000);
+    } else {
+      console.warn(`[IndiaMART Agent] ⚠️ Card not found at index ${cardIndex} and could not match by lead data`);
     }
 
+    // Enhanced button search: try multiple strategies with better logging
+    console.log(`[IndiaMART Agent] 🔍 Searching for "Contact Buyer Now" button...`);
     const contactButton = await waitForElement(() => {
-      const button = findElementByText(card, 'button, a', CONTACT_BUTTON_TEXT);
-      if (isElementVisible(button)) return button;
-      const located = locateContactButton(card);
-      return isElementVisible(located) ? located : null;
-    }, 8000);
+      // Strategy 1: Try finding button in card (if card exists)
+      if (card) {
+        const button = findElementByText(card, 'button, a', CONTACT_BUTTON_TEXT);
+        if (isElementVisible(button)) {
+          console.log(`[IndiaMART Agent] ✅ Found button in card using findElementByText`);
+          return button;
+        }
+        const located = locateContactButton(card, false);
+        if (isElementVisible(located)) {
+          console.log(`[IndiaMART Agent] ✅ Found button in card using locateContactButton`);
+          return located;
+        }
+      }
+      
+      // Strategy 2: Document-wide search (especially for detail pages)
+      const docButton = findElementByText(document, 'button, a', CONTACT_BUTTON_TEXT);
+      if (isElementVisible(docButton)) {
+        console.log(`[IndiaMART Agent] ✅ Found button in document using findElementByText`);
+        return docButton;
+      }
+      
+      // Strategy 3: Use enhanced locateContactButton with document search
+      const locatedDoc = locateContactButton(card, true);
+      if (isElementVisible(locatedDoc)) {
+        console.log(`[IndiaMART Agent] ✅ Found button in document using locateContactButton`);
+        return locatedDoc;
+      }
+      
+      // Strategy 4: Flexible text search in document
+      const allButtons = document.querySelectorAll<HTMLElement>('button, a, [role="button"]');
+      for (const btn of allButtons) {
+        const text = (btn.textContent || '').trim().toLowerCase();
+        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
+        if ((text.includes('contact buyer') || ariaLabel.includes('contact buyer')) && isElementVisible(btn)) {
+          console.log(`[IndiaMART Agent] ✅ Found button using flexible text search: "${text.substring(0, 50)}"`);
+          return btn;
+        }
+      }
+      
+      return null;
+    }, 15000); // Increased timeout to 15 seconds for better reliability
 
     if (shouldAbort()) {
       console.info('[IndiaMART Agent] Contact flow aborted after locating contact button (auto-contact disabled or agent stopped).');
@@ -1287,17 +1514,24 @@ import type { Lead } from './types';
     }
 
     if (!contactButton) {
-      console.warn('[IndiaMART Agent] Contact button could not be located for card index:', cardIndex, lead?.companyName);
+      console.error(`[IndiaMART Agent] ❌ Contact button could not be located for card index: ${cardIndex}, Lead: ${lead?.companyName || 'N/A'}, Detail page: ${isDetailPage}`);
+      console.error(`[IndiaMART Agent] Available buttons on page:`, Array.from(document.querySelectorAll('button, a')).slice(0, 5).map(b => b.textContent?.trim()).filter(Boolean));
       return { success: false, error: 'Contact Buyer Now button not found.' };
     }
 
-    console.debug('[IndiaMART Agent] Contact button located, preparing to submit contact flow.');
-    console.debug('[IndiaMART Agent] Clicking Contact Buyer button for lead:', lead?.companyName || cardIndex);
+    console.log(`[IndiaMART Agent] ✅ Contact button located! Button text: "${contactButton.textContent?.trim()}"`);
+    console.log(`[IndiaMART Agent] 🖱️ Clicking Contact Buyer Now button for lead: ${lead?.companyName || cardIndex}`);
+    
+    // Ensure button is visible and in viewport before clicking
+    contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await delay(500);
+    
     await clickWithFallback(contactButton, 'Contact Buyer');
-    console.info('[IndiaMART Agent] Clicked Contact Buyer button for lead:', lead?.companyName || cardIndex);
+    console.log(`[IndiaMART Agent] ✅ Clicked Contact Buyer Now button for lead: ${lead?.companyName || cardIndex}`);
 
-    // Wait a moment for any modal to appear (expired/consumed lead error)
-    await delay(1000);
+    // Wait for contact form/modal to appear after clicking Contact Buyer Now
+    console.log(`[IndiaMART Agent] ⏳ Waiting for contact form to appear...`);
+    await delay(2000); // Increased delay for form to load
 
     // Check for expired/consumed lead error modal
     const expiredModal = detectExpiredLeadModal();
@@ -1328,12 +1562,21 @@ import type { Lead } from './types';
     }
 
     // Attempt to fill the message while the form loads
+    console.log(`[IndiaMART Agent] 📝 Preparing to fill contact message...`);
     const desiredMessage = composeContactMessage(lead);
+    console.log(`[IndiaMART Agent] Message preview: ${desiredMessage.substring(0, 100)}...`);
     let messageFilled = fillContactMessage(desiredMessage);
+    if (messageFilled) {
+      console.log(`[IndiaMART Agent] ✅ Message filled successfully`);
+    }
 
+    console.log(`[IndiaMART Agent] 🔍 Waiting for Send Reply button to appear...`);
     const replyButton = await waitForElement(() => {
       if (!messageFilled) {
         messageFilled = fillContactMessage(desiredMessage);
+        if (messageFilled) {
+          console.log(`[IndiaMART Agent] ✅ Message filled on retry`);
+        }
       }
 
       const contexts = getInteractionContexts();
@@ -1341,13 +1584,19 @@ import type { Lead } from './types';
         for (const selector of SEND_REPLY_BUTTON_SELECTORS) {
           const candidate = ctx.querySelector<HTMLElement>(selector);
           if (isElementVisible(candidate)) {
+            console.log(`[IndiaMART Agent] ✅ Found Send Reply button using selector: ${selector}`);
             return candidate;
           }
         }
       }
 
       const fallbackButton = findSendReplyButton();
-      return isElementVisible(fallbackButton) ? fallbackButton : null;
+      if (isElementVisible(fallbackButton)) {
+        console.log(`[IndiaMART Agent] ✅ Found Send Reply button using findSendReplyButton fallback`);
+        return fallbackButton;
+      }
+      
+      return null;
     }, 20000);
 
     if (shouldAbort()) {
@@ -1356,8 +1605,12 @@ import type { Lead } from './types';
     }
 
     if (!replyButton) {
+      console.error(`[IndiaMART Agent] ❌ Send Reply button not found after opening contact form for lead: ${lead?.companyName || 'N/A'}`);
+      console.error(`[IndiaMART Agent] Available buttons:`, Array.from(document.querySelectorAll('button')).slice(0, 10).map(b => b.textContent?.trim()).filter(Boolean));
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
+    
+    console.log(`[IndiaMART Agent] ✅ Send Reply button found! Button text: "${replyButton.textContent?.trim()}"`);
 
     if (!messageFilled) {
       // Try one last time before sending
@@ -1369,7 +1622,8 @@ import type { Lead } from './types';
 
     // Ensure button is in view before clicking
     replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    console.debug('[IndiaMART Agent] Clicking Send Reply button.');
+    await delay(500); // Wait for scroll
+    console.log(`[IndiaMART Agent] 🖱️ Clicking Send Reply button for lead: ${lead?.companyName || 'N/A'}`);
 
     if (shouldAbort()) {
       console.info('[IndiaMART Agent] Contact flow aborted before clicking Send Reply (auto-contact disabled or agent stopped).');
@@ -1377,6 +1631,7 @@ import type { Lead } from './types';
     }
 
     await clickWithFallback(replyButton, 'Send Reply');
+    console.log(`[IndiaMART Agent] ✅ Clicked Send Reply button for lead: ${lead?.companyName || 'N/A'}`);
 
     // Give the site a moment to register the submission
     await delay(1200);
@@ -1450,15 +1705,15 @@ import type { Lead } from './types';
   // Default filter values (used as fallback)
   const DEFAULT_ENQUIRY_KEYWORDS = [
     'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'school jackets', 'nurse uniform',
-    'chef coats', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
+    'chef coats', 'coat', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
     'kids school uniform', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
     'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety suits',
-    'boys school uniform', 'surgical gown', 'hospital uniforms'
+    'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms'
   ];
   const DEFAULT_ALLOWED_CATEGORIES = [
     'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
     'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
-    'safety suits', 'boys school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
+    'safety suits', 'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
     'school jackets'
   ];
 
@@ -1467,8 +1722,8 @@ import type { Lead } from './types';
   let allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
 
   const foreignIndicators = ['usa', 'uk', 'uae', 'canada', 'australia', 'singapore', 'malaysia'];
-  let quantityThreshold = { min: 100, unit: 'piece' };
-  let orderValueMin = 50000;
+  let quantityThreshold = { min: 20, unit: 'piece' };
+  let orderValueMin = 5000;
   interface DailyContactStats {
     date: string;
     count: number;
@@ -1818,60 +2073,128 @@ import type { Lead } from './types';
       return { passed: false, reason: 'Filter config not loaded', nextContactDelayMinutes: 0 };
     }
 
+    console.log(`[IndiaMART Agent] 🔍 Applying filters for: ${lead.companyName || 'N/A'}`);
+    console.log(`  - Threshold: Quantity ≥ ${quantityThreshold.min} ${quantityThreshold.unit}, Order Value ≥ ₹${orderValueMin.toLocaleString()}`);
+
     // Note: We're using the runtime arrays (enquiryKeywords, allowedCategories) which are updated from storage
     // These arrays are NOT the hardcoded DEFAULT arrays - they're mutable variables that get updated
 
-    // Filter 1: Enquiry Title Keywords (inclusive match)
+    // Filter 1: Enquiry Title Keywords (universal uniform check + keyword list)
     const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
-    const hasKeyword = enquiryKeywords.some(keyword => titleLower.includes(keyword));
-    if (!hasKeyword) return { passed: false, reason: 'No uniform keywords found', nextContactDelayMinutes: 0 };
+    console.log(`  - Filter 1 (Keywords): Checking title "${lead.enquiryTitle || lead.requirement || 'N/A'}"`);
+    
+    // Primary check: Universal uniform keywords (passes immediately if found)
+    const uniformPatterns = [
+      /\buniform\b/,
+      /\buniforms\b/,
+      /\buniform\s+fabric\b/,
+      /\buniform\s+fabrics\b/,
+      /\buniform-fabric\b/,
+      /\buniform_fabric\b/
+    ];
+    const hasUniformKeyword = uniformPatterns.some(pattern => pattern.test(titleLower));
+    
+    // Fallback check: Keyword list (only if uniform not found)
+    const hasKeyword = hasUniformKeyword || enquiryKeywords.some(keyword => titleLower.includes(keyword));
+    
+    if (!hasKeyword) {
+      console.log(`  - Filter 1: ❌ FAILED - No uniform keywords found in title`);
+      return { passed: false, reason: 'No uniform keywords found', nextContactDelayMinutes: 0 };
+    }
+    console.log(`  - Filter 1: ✅ PASSED - Found uniform keyword`);
     
     // Filter 2: Location exclusion
     const locationLower = (lead.location || '').toLowerCase();
+    console.log(`  - Filter 2 (Location): Checking location "${lead.location || 'N/A'}"`);
     
     // Check for foreign locations (reject if any foreign indicator is present)
     const isForeign = foreignIndicators.some(country => locationLower.includes(country));
-    if (isForeign) return { passed: false, reason: 'Foreign location', nextContactDelayMinutes: 0 };
+    if (isForeign) {
+      console.log(`  - Filter 2: ❌ FAILED - Foreign location detected`);
+      return { passed: false, reason: 'Foreign location', nextContactDelayMinutes: 0 };
+    }
+    console.log(`  - Filter 2: ✅ PASSED - Not a foreign location`);
     
-    // Filter 3: Quantity > 100
-    const quantityUnitOk =
-      typeof lead.quantity === 'number' &&
-      lead.quantity >= quantityThreshold.min &&
-      typeof lead.quantityRaw === 'string' &&
-      lead.quantityRaw.toLowerCase().includes(quantityThreshold.unit);
-    if (!quantityUnitOk) {
+    // Filter 3: Quantity ≥ threshold (flexible - check number first, unit match optional)
+    console.log(`  - Filter 3 (Quantity): Checking quantity ${lead.quantity || 'N/A'} (raw: ${lead.quantityRaw || 'N/A'})`);
+    
+    // Special handling: If title contains "coat", use lower quantity threshold (10 pieces)
+    const hasCoatKeyword = titleLower.includes('coat');
+    const effectiveQuantityThreshold = hasCoatKeyword ? 10 : quantityThreshold.min;
+    
+    if (hasCoatKeyword) {
+      console.log(`  - Filter 3: ⚠️ "Coat" keyword detected - using lower quantity threshold: ${effectiveQuantityThreshold} pieces`);
+    }
+    
+    // First check: quantity number must meet threshold
+    const quantityMeetsThreshold = typeof lead.quantity === 'number' && lead.quantity >= effectiveQuantityThreshold;
+    
+    if (!quantityMeetsThreshold) {
+      console.log(`  - Filter 3: ❌ FAILED - Quantity ${lead.quantity || 'N/A'} < ${effectiveQuantityThreshold}`);
       return {
         passed: false,
-        reason: `Quantity must be ≥ ${quantityThreshold.min} ${quantityThreshold.unit.charAt(0).toUpperCase()}${quantityThreshold.unit.slice(1)}`,
+        reason: `Quantity must be ≥ ${effectiveQuantityThreshold} ${quantityThreshold.unit.charAt(0).toUpperCase()}${quantityThreshold.unit.slice(1)}`,
         nextContactDelayMinutes: 0
       };
     }
     
-    // Filter 4: Category match (exact match)
+    // Second check: if quantityRaw is available, verify it includes the expected unit (optional check)
+    // This is a soft check - if quantityRaw doesn't exist or doesn't match unit, still pass if quantity number is valid
+    if (typeof lead.quantityRaw === 'string' && lead.quantityRaw.trim()) {
+      const quantityRawLower = lead.quantityRaw.toLowerCase();
+      const hasUnitMatch = quantityRawLower.includes(quantityThreshold.unit.toLowerCase());
+      // Only warn if unit doesn't match, but don't fail the filter
+      if (!hasUnitMatch) {
+        console.log(`  - Filter 3: ⚠️ Quantity ${lead.quantity} meets threshold, but quantityRaw "${lead.quantityRaw}" doesn't match unit "${quantityThreshold.unit}" - still passing filter`);
+      }
+    }
+    console.log(`  - Filter 3: ✅ PASSED - Quantity ${lead.quantity} >= ${effectiveQuantityThreshold}`);
+    
+    // Filter 4: Category match
     const categoryLower = (lead.category || '').toLowerCase();
-    const hasCategory = allowedCategories.some((keyword) => {
+    console.log(`  - Filter 4 (Category): Checking category "${lead.category || 'N/A'}"`);
+    
+    // First check: automatically pass if category contains "uniform" or "uniform fabric"
+    const uniformKeywords = ['uniform', 'uniform fabric', 'uniforms', 'uniform-fabric', 'uniform_fabric'];
+    const categoryHasUniform = uniformKeywords.some(keyword => categoryLower.includes(keyword));
+    
+    // Second check: fall back to allowedCategories list if no uniform keyword found
+    const hasCategory = categoryHasUniform || allowedCategories.some((keyword) => {
       const normalized = keyword.toLowerCase();
       return categoryLower.includes(normalized) || normalized.includes(categoryLower);
     });
+    
+    // Only fail if category exists but doesn't match either condition
     if (!hasCategory && lead.category) {
+      console.log(`  - Filter 4: ❌ FAILED - Category "${lead.category}" not in allowed list`);
       return { passed: false, reason: 'Category not in allowed list', nextContactDelayMinutes: 0 };
+    }
+    if (!lead.category) {
+      console.log(`  - Filter 4: ⚠️ No category found, skipping category check`);
+    } else {
+      console.log(`  - Filter 4: ✅ PASSED - Category "${lead.category}" matches`);
     }
     
     // Filter 5: Probable Order Value ≥ ₹10,000
     const orderValue = lead.probableOrderValueMin || lead.probableOrderValueMax || 0;
+    console.log(`  - Filter 5 (Order Value): Checking order value ${orderValue} (Min: ${lead.probableOrderValueMin || 'N/A'}, Max: ${lead.probableOrderValueMax || 'N/A'})`);
     if (orderValue < orderValueMin) {
+      console.log(`  - Filter 5: ❌ FAILED - Order value ${orderValue} < ${orderValueMin}`);
       return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
     }
+    console.log(`  - Filter 5: ✅ PASSED - Order value ${orderValue} >= ${orderValueMin}`);
     
     // Generate random delay between 1-10 minutes for qualified leads
     const delayOptions = [1, 5, 10];
     const randomDelay = delayOptions[Math.floor(Math.random() * delayOptions.length)];
     
+    console.log(`[IndiaMART Agent] ✅ ALL FILTERS PASSED for ${lead.companyName || 'N/A'}`);
     return { passed: true, reason: 'Meets all criteria', nextContactDelayMinutes: randomDelay };
   };
 
   const selectLeadsForCycle = (leads: Lead[]): Lead[] => {
     if (!leads.length) return [];
+    // Select all filtered leads, sorted by order value (highest first)
     const scored = leads
       .map((lead) => {
         const value = lead.probableOrderValueMax ?? lead.probableOrderValueMin ?? 0;
@@ -1879,13 +2202,8 @@ import type { Lead } from './types';
       })
       .sort((a, b) => b.value - a.value);
 
-    if (scored.length >= 3) {
-      return [scored[1].lead, scored[2].lead];
-    }
-    if (scored.length === 2) {
-      return [scored[1].lead];
-    }
-    return [scored[0].lead];
+    // Return all leads, sorted by order value
+    return scored.map(item => item.lead);
   };
 
   const scheduleProcessingCycle = (immediate = false) => {
@@ -1935,7 +2253,7 @@ import type { Lead } from './types';
     }
 
     const delayMs = getStealthDelayMs();
-    lastScheduledRefreshWindow = `${(delayMs / 60000).toFixed(2)}m`;
+    lastScheduledRefreshWindow = `${(delayMs / 1000).toFixed(0)}s`;
     console.log(`[IndiaMART Agent] Next refresh scheduled in ${lastScheduledRefreshWindow}.`);
 
     pageRefreshTimer = setTimeout(() => {
@@ -2331,75 +2649,79 @@ import type { Lead } from './types';
           continue;
         }
 
+        // Enhanced logging for debugging
+        console.log(`[IndiaMART Agent] 🔍 Processing lead: ${lead.companyName || 'N/A'}`);
+        console.log(`  - Enquiry Title: ${lead.enquiryTitle || 'N/A'}`);
+        console.log(`  - Category: ${lead.category || 'N/A'}`);
+        console.log(`  - Quantity: ${lead.quantity || 'N/A'} (raw: ${lead.quantityRaw || 'N/A'})`);
+        console.log(`  - Order Value: Min=${lead.probableOrderValueMin || 'N/A'}, Max=${lead.probableOrderValueMax || 'N/A'}, Raw=${lead.probableOrderValueRaw || 'N/A'}`);
+        console.log(`  - Location: ${lead.location || 'N/A'}`);
+        console.log(`  - Lead ID: ${lead.leadId || 'N/A'}`);
+        console.log(`  - Card Index: ${lead.cardIndex !== undefined ? lead.cardIndex : 'N/A'}`);
+
         const filterResult = applyIntelligentFilter(lead);
         lead.passedFilter = filterResult.passed;
         lead.filterReason = filterResult.reason;
         lead.nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
         leadEvaluations.push({ lead, passed: filterResult.passed, reason: filterResult.reason });
 
-        console.log(`[IndiaMART Agent] Lead: ${lead.companyName}`);
-        console.log(`  - Filter passed: ${filterResult.passed}`);
+        console.log(`[IndiaMART Agent] ✅ Filter Result: ${filterResult.passed ? 'PASSED' : 'FAILED'}`);
         console.log(`  - Reason: ${filterResult.reason}`);
 
         if (filterResult.passed) {
+          // Add to filtered leads array for statistics/logging
           filteredLeads.push(lead);
-        }
-      }
+          filteredLeadsCount = filteredLeads.length;
 
-      filteredLeadsCount = filteredLeads.length;
-      const contactAllowed = canContactMoreToday();
-      const selectedLeads = contactAllowed ? selectLeadsForCycle(filteredLeads) : [];
-      pendingContacts = [...selectedLeads];
-
-      if (!selectedLeads.length) {
-        if (!contactAllowed) {
-          cycleActions.push('Daily quota reached. Cycle limited to monitoring only.');
-          notifyDailyLimitReached();
-        } else {
-          cycleActions.push('No leads selected this cycle (insufficient qualified leads).');
-        }
-      } else {
-        for (const lead of selectedLeads) {
-          if (isStopped || !isAutoContactEnabled) {
-            break;
-          }
-          if (!canContactMoreToday()) {
-            cycleActions.push('Daily quota met mid-cycle. Remaining leads deferred.');
-            notifyDailyLimitReached();
-            break;
-          }
-
-          const contacted = await processFilteredLead(lead, lead.cardIndex || 0);
-          if (contacted) {
-            await incrementDailyContactCount();
-            contactedLeadHistory.set(lead.leadId, Date.now());
-            purgeStaleContactHistory();
-            clearAutomationErrors();
-            cycleActions.push(`Contacted ${lead.companyName || lead.leadId}`);
-            if (!canContactMoreToday()) {
-              notifyDailyLimitReached();
-              break;
+          // Immediately process this lead if auto-contact is enabled and quota allows
+          if (isAutoContactEnabled && !isStopped && canContactMoreToday()) {
+            console.log(`[IndiaMART Agent] 🎯 Lead passed filters - immediately clicking "Contact Buyer Now" for: ${lead.companyName || lead.leadId}`);
+            
+            const contacted = await processFilteredLead(lead, lead.cardIndex || 0);
+            if (contacted) {
+              await incrementDailyContactCount();
+              contactedLeadHistory.set(lead.leadId, Date.now());
+              purgeStaleContactHistory();
+              clearAutomationErrors();
+              cycleActions.push(`Contacted ${lead.companyName || lead.leadId}`);
+              contactedLeadsCount++;
+              
+              // Add delay before processing next lead
+              if (typeof lead.nextContactDelayMinutes === 'number' && lead.nextContactDelayMinutes > 0) {
+                await delay(lead.nextContactDelayMinutes * 60 * 1000);
+              } else {
+                await delay(randomBetween(1000, 3000));
+              }
+            } else {
+              const errMsg = `Failed to contact ${lead.companyName || lead.leadId}`;
+              cycleErrors.push(errMsg);
+              registerAutomationError(errMsg);
             }
-          } else {
-            const errMsg = `Failed to contact ${lead.companyName || lead.leadId}`;
-            cycleErrors.push(errMsg);
-            registerAutomationError(errMsg);
-          }
 
-          if (typeof lead.nextContactDelayMinutes === 'number' && lead.nextContactDelayMinutes > 0) {
-            await delay(lead.nextContactDelayMinutes * 60 * 1000);
-          } else {
-            await delay(randomBetween(1000, 3000));
+            // Check if daily quota reached after contact
+            if (!canContactMoreToday()) {
+              cycleActions.push('Daily quota met mid-cycle. Remaining leads deferred.');
+              notifyDailyLimitReached();
+              break; // Stop processing more leads
+            }
+          } else if (!canContactMoreToday()) {
+            cycleActions.push('Daily quota reached. Skipping remaining leads.');
+            notifyDailyLimitReached();
+            break; // Stop processing more leads
           }
         }
       }
+
+      // Update final counts for statistics
+      filteredLeadsCount = filteredLeads.length;
+      pendingContacts = [...filteredLeads];
 
       const buyLeadBalance = getBuyLeadBalanceEstimate();
       const cycleSummary = {
         timestamp: cycleTimestamp,
         totalLeads: leads.length,
         qualifiedLeads: filteredLeads.length,
-        selectedLeads: selectedLeads.map((lead) => ({
+        selectedLeads: filteredLeads.map((lead) => ({
           id: lead.leadId,
           company: lead.companyName,
           orderValue: formatOrderValueRange(lead) || 'N/A',
@@ -2426,7 +2748,7 @@ import type { Lead } from './types';
       console.log('[IndiaMART Agent] ========== FILTERING SUMMARY ==========');
       console.log(`[IndiaMART Agent] Total leads: ${leads.length}`);
       console.log(`[IndiaMART Agent] Filtered (qualified) leads: ${filteredLeadsCount}`);
-      console.log(`[IndiaMART Agent] Selected for contact this cycle: ${selectedLeads.length}`);
+      console.log(`[IndiaMART Agent] Contacted leads this cycle: ${contactedLeadsCount}`);
 
       await saveFilteringSummaryToStorage(
         leads.length,
@@ -2434,7 +2756,7 @@ import type { Lead } from './types';
         leads.length - filteredLeadsCount,
         filteredLeads,
         leadEvaluations,
-        selectedLeads,
+        filteredLeads, // All filtered leads are now selected/processed immediately
         cycleSummary
       );
       try {
