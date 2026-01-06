@@ -357,15 +357,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Find if the tab already exists
     chrome.tabs.query({ url: targetUrl }, (tabs) => {
       autoContactState.stopped = false;
-      autoContactState.enabled = true;
+      autoContactState.enabled = true; // Enable auto-contact by default when agent starts
+      autoContactState.statistics.sessionStartTime = Date.now();
       agentActive = false;
       latestLeadsPayload = null;
+      
+      // Setup alarm for periodic log processing
+      setupLogProcessingAlarm();
+      
+      const enableAutoContact = (tabId: number) => {
+        // Wait a bit for content script to be ready, then enable auto-contact
+        setTimeout(() => {
+          chrome.tabs.sendMessage(tabId, { type: 'ENABLE_AUTO_CONTACT' }, (response) => {
+            if (chrome.runtime.lastError) {
+              // Content script might not be ready yet, try again
+              setTimeout(() => {
+                chrome.tabs.sendMessage(tabId, { type: 'ENABLE_AUTO_CONTACT' });
+              }, 1000);
+            }
+          });
+        }, 500);
+      };
       
       if (tabs.length > 0 && tabs[0].id) {
         // If tab exists, focus it and inject the script
         chrome.tabs.update(tabs[0].id, { active: true }, (tab) => {
           if (tab && tab.id) {
              injectScript(tab.id);
+             enableAutoContact(tab.id);
           }
         });
       } else {
@@ -377,6 +396,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                         // Remove listener to avoid multiple injections
                         chrome.tabs.onUpdated.removeListener(listener);
                         injectScript(tabId);
+                        enableAutoContact(tabId);
                     }
                 };
                 chrome.tabs.onUpdated.addListener(listener);
@@ -503,16 +523,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true, state: autoContactState });
     return true;
   } else if (message.type === 'GET_AGENT_STATUS') {
-    sendResponse({
-      success: true,
-      agentActive,
-      agentStopped: autoContactState.stopped,
-      autoContactEnabled: autoContactState.enabled,
-      statistics: autoContactState.statistics,
-      leadsPayload: latestLeadsPayload,
-      dailyStats: dailyStatsCache,
+    // Load contacted leads from storage
+    const CONTACT_SUCCESS_KEY = 'indiamart_contact_successes';
+    chrome.storage.local.get([CONTACT_SUCCESS_KEY], (stored) => {
+      let contactedLeads: any[] = [];
+      try {
+        if (stored[CONTACT_SUCCESS_KEY] && Array.isArray(stored[CONTACT_SUCCESS_KEY])) {
+          contactedLeads = stored[CONTACT_SUCCESS_KEY];
+        }
+      } catch (error) {
+        console.error('[Background] Error loading contacted leads:', error);
+      }
+      
+      sendResponse({
+        success: true,
+        agentActive,
+        agentStopped: autoContactState.stopped,
+        autoContactEnabled: autoContactState.enabled,
+        statistics: autoContactState.statistics,
+        leadsPayload: latestLeadsPayload,
+        dailyStats: dailyStatsCache,
+        contactedLeads, // Include contacted leads from storage
+      });
     });
-    return true;
+    return true; // Keep channel open for async response
   } else if (message.type === 'LOG_PROCESSING_SUCCESS') {
     // Content script processed, but we only notify UI on actual change (LOGS_UPDATED)
     lastSuccessfulLogTime = Date.now();

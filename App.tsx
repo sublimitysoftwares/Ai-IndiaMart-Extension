@@ -106,29 +106,115 @@ const App: React.FC = () => {
   useEffect(() => {
     // Ensure this code runs only within a Chrome extension context
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
+      // Listen for storage changes to reload settings when they're updated
+      if (chrome.storage && chrome.storage.onChanged) {
+        const storageListener = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
+          if (areaName === 'local') {
+            const filterKeys = [
+              'indiamart_filter_keywords',
+              'indiamart_filter_categories',
+              'indiamart_filter_quantity',
+              'indiamart_filter_order_value'
+            ];
+            const hasFilterChange = filterKeys.some(key => changes[key]);
+            if (hasFilterChange && showSettings) {
+              console.log('[Popup] Storage changed, reloading filter config...');
+              loadFilterConfig();
+            }
+          }
+        };
+        chrome.storage.onChanged.addListener(storageListener);
+        
+        // Cleanup listener on unmount
+        return () => {
+          chrome.storage?.onChanged.removeListener(storageListener);
+        };
+      }
+    }
+  }, [showSettings]);
+  
+  useEffect(() => {
+    // Ensure this code runs only within a Chrome extension context
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
       chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (response) => {
         if (!response || response.success === false) {
           return;
         }
+        
+        // IMMEDIATE state updates (don't wait for async storage operations)
+        // Always update auto-contact state from response first (before any conditional logic)
+        if (typeof response.autoContactEnabled === 'boolean') {
+          setAutoContactEnabled(response.autoContactEnabled);
+        }
+        
+        // Update agent stopped state immediately
+        setAgentStopped(Boolean(response.agentStopped));
+        agentStoppedRef.current = Boolean(response.agentStopped);
+        
         if (response.dailyStats) {
           setDailyStats(response.dailyStats);
         }
 
+        // Load contacted leads from storage (non-blocking)
+        if (response.contactedLeads && Array.isArray(response.contactedLeads)) {
+          // Store contacted leads for display in success logs
+          if (typeof chrome !== 'undefined' && chrome.storage) {
+            chrome.storage.local.set({ 'indiamart_contacted_leads_cache': response.contactedLeads });
+          }
+        }
+
+        // Determine app state immediately based on response
         if (response.agentStopped) {
-          setAgentStopped(true);
-          agentStoppedRef.current = true;
-          setAgentInitialized(false);
-          setLeads([]);
-          setFilteredLeads([]);
-          setAutoContactEnabled(Boolean(response.autoContactEnabled));
+          // Agent is stopped - update UI immediately, load data in background
           setAppState(AppState.Idle);
+          setAgentInitialized(true);
+          
+          // Load persisted data from storage (non-blocking)
+          if (typeof chrome !== 'undefined' && chrome.storage) {
+            chrome.storage.local.get(['indiamart_leads_cache', 'indiamart_filtered_leads_cache', 'indiamart_contacted_leads_cache'], (result) => {
+              if (result.indiamart_leads_cache && Array.isArray(result.indiamart_leads_cache)) {
+                setLeads(result.indiamart_leads_cache);
+              }
+              if (result.indiamart_filtered_leads_cache && Array.isArray(result.indiamart_filtered_leads_cache)) {
+                setFilteredLeads(result.indiamart_filtered_leads_cache);
+              }
+              // Update stats from stored contacted leads
+              if (result.indiamart_contacted_leads_cache && Array.isArray(result.indiamart_contacted_leads_cache)) {
+                setAutoContactStats((prev) => ({
+                  ...prev,
+                  totalContacted: result.indiamart_contacted_leads_cache.length,
+                  totalFiltered: result.indiamart_filtered_leads_cache?.length || prev.totalFiltered,
+                }));
+              }
+              // Update app state if we have leads data
+              if (result.indiamart_leads_cache && Array.isArray(result.indiamart_leads_cache) && result.indiamart_leads_cache.length > 0) {
+                setAppState(AppState.LeadsScraped);
+              }
+            });
+          }
           return;
         }
 
         if (response.agentActive && response.leadsPayload) {
-          setLeads(response.leadsPayload.allLeads || []);
-          setFilteredLeads(response.leadsPayload.filteredLeads || []);
-          setAutoContactEnabled(Boolean(response.autoContactEnabled));
+          // Agent is active with leads payload - update everything immediately
+          const allLeads = response.leadsPayload.allLeads || [];
+          const filteredLeadsData = response.leadsPayload.filteredLeads || [];
+          
+          setLeads(allLeads);
+          setFilteredLeads(filteredLeadsData);
+          setAgentInitialized(true);
+          
+          // Update app state immediately based on auto-contact status
+          setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+          
+          // Persist leads to storage (non-blocking)
+          if (typeof chrome !== 'undefined' && chrome.storage) {
+            chrome.storage.local.set({
+              'indiamart_leads_cache': allLeads,
+              'indiamart_filtered_leads_cache': filteredLeadsData,
+            });
+          }
+          
           if (response.leadsPayload?.filters) {
             setFilterCriteria(response.leadsPayload.filters);
           }
@@ -147,14 +233,57 @@ const App: React.FC = () => {
               totalContacted: contactedCount,
             };
           });
-          setAgentStopped(Boolean(response.agentStopped));
-          agentStoppedRef.current = Boolean(response.agentStopped);
+        } else if (response.agentActive && !response.leadsPayload) {
+          // Agent is active but no leads payload yet - show loading or auto-contact state
           setAgentInitialized(true);
-          setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+          setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.Loading);
+          
+          // Try to load persisted data in background
+          if (typeof chrome !== 'undefined' && chrome.storage) {
+            chrome.storage.local.get(['indiamart_leads_cache', 'indiamart_filtered_leads_cache', 'indiamart_contacted_leads_cache'], (result) => {
+              if (result.indiamart_leads_cache && Array.isArray(result.indiamart_leads_cache)) {
+                setLeads(result.indiamart_leads_cache);
+                setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+              }
+              if (result.indiamart_filtered_leads_cache && Array.isArray(result.indiamart_filtered_leads_cache)) {
+                setFilteredLeads(result.indiamart_filtered_leads_cache);
+              }
+              if (result.indiamart_contacted_leads_cache && Array.isArray(result.indiamart_contacted_leads_cache)) {
+                setAutoContactStats((prev) => ({
+                  ...prev,
+                  totalContacted: result.indiamart_contacted_leads_cache.length,
+                }));
+              }
+            });
+          }
         } else {
+          // Agent not active - try to load persisted data but update UI immediately
+          const hasAutoContact = response.autoContactEnabled;
           setAgentInitialized(false);
-          setAutoContactEnabled(response?.autoContactEnabled ?? false);
-          setAppState(AppState.Idle);
+          
+          // Update app state immediately based on whether we might have cached data
+          // We'll check storage but don't wait for it
+          setAppState(hasAutoContact ? AppState.AutoContact : AppState.Idle);
+          
+          // Try to load persisted data if agent is not active (non-blocking)
+          if (typeof chrome !== 'undefined' && chrome.storage) {
+            chrome.storage.local.get(['indiamart_leads_cache', 'indiamart_filtered_leads_cache', 'indiamart_contacted_leads_cache'], (result) => {
+              if (result.indiamart_leads_cache && Array.isArray(result.indiamart_leads_cache)) {
+                setLeads(result.indiamart_leads_cache);
+                setAgentInitialized(true);
+                setAppState(hasAutoContact ? AppState.AutoContact : AppState.LeadsScraped);
+              }
+              if (result.indiamart_filtered_leads_cache && Array.isArray(result.indiamart_filtered_leads_cache)) {
+                setFilteredLeads(result.indiamart_filtered_leads_cache);
+              }
+              if (result.indiamart_contacted_leads_cache && Array.isArray(result.indiamart_contacted_leads_cache)) {
+                setAutoContactStats((prev) => ({
+                  ...prev,
+                  totalContacted: result.indiamart_contacted_leads_cache.length,
+                }));
+              }
+            });
+          }
         }
       });
 
@@ -181,7 +310,10 @@ const App: React.FC = () => {
           if (message.payload) {
             setLeads(message.payload.allLeads || []);
             setFilteredLeads(message.payload.filteredLeads || []);
-            const autoContactFlag = Boolean(message.payload.autoContactEnabled ?? autoContactEnabled);
+            // Always update auto-contact state from payload if provided, otherwise keep current state
+            const autoContactFlag = typeof message.payload.autoContactEnabled === 'boolean' 
+              ? message.payload.autoContactEnabled 
+              : Boolean(message.payload.autoContactEnabled ?? autoContactEnabled);
             setAutoContactEnabled(autoContactFlag);
             setAppState(autoContactFlag ? AppState.AutoContact : AppState.LeadsScraped);
             setAgentInitialized(true);
@@ -313,19 +445,27 @@ const App: React.FC = () => {
         if (!agentInitialized) {
           setAppState(AppState.Loading);
         }
+        // Optimistic UI updates - set immediately before response
+        setAgentStopped(false);
+        agentStoppedRef.current = false;
+        setAutoContactEnabled(true);
+        setAppState(AppState.Loading);
+        
         chrome.runtime.sendMessage({ type: 'START_AGENT' }, (response) => {
           if (chrome.runtime.lastError) {
             console.error('START_AGENT error:', chrome.runtime.lastError.message);
             setError('Failed to start agent. Please try again.');
             setAppState(AppState.Error);
+            // Revert optimistic state on error
+            setAgentStopped(true);
+            agentStoppedRef.current = true;
+            setAutoContactEnabled(false);
             return;
           }
 
           if (response && response.success) {
-            setAgentStopped(false);
-            agentStoppedRef.current = false;
-            setAutoContactEnabled(true);
-
+            // Keep optimistic state, will be confirmed by GET_AGENT_STATUS
+            
             chrome.runtime.sendMessage({ type: 'ENABLE_AUTO_CONTACT' });
 
             if (response.leadsPayload) {
@@ -333,9 +473,49 @@ const App: React.FC = () => {
               setFilteredLeads(response.leadsPayload.filteredLeads || []);
               setAgentInitialized(true);
               setAppState(AppState.AutoContact);
-            } else if (!agentInitialized) {
-              // Wait for content script to report back
+            } else {
+              // No leads payload yet - query status immediately and poll for updates
               setAppState(AppState.Loading);
+              
+              // Immediate status query
+              const queryStatus = (attempt: number = 1) => {
+                chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (statusResponse) => {
+                  if (statusResponse && statusResponse.success) {
+                    if (statusResponse.agentActive && statusResponse.leadsPayload) {
+                      // Agent is active with data - update UI
+                      const allLeads = statusResponse.leadsPayload.allLeads || [];
+                      const filteredLeadsData = statusResponse.leadsPayload.filteredLeads || [];
+                      
+                      setLeads(allLeads);
+                      setFilteredLeads(filteredLeadsData);
+                      setAutoContactEnabled(Boolean(statusResponse.autoContactEnabled));
+                      setAgentInitialized(true);
+                      setAppState(statusResponse.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+                      
+                      if (statusResponse.leadsPayload.filters) {
+                        setFilterCriteria(statusResponse.leadsPayload.filters);
+                      }
+                      
+                      if (statusResponse.statistics) {
+                        setAutoContactStats(prev => ({
+                          ...prev,
+                          totalFiltered: statusResponse.statistics.totalFiltered || prev.totalFiltered,
+                          totalContacted: statusResponse.statistics.totalContacted || prev.totalContacted,
+                        }));
+                      }
+                    } else if (attempt < 3) {
+                      // Poll up to 3 times with increasing delays
+                      setTimeout(() => queryStatus(attempt + 1), attempt === 1 ? 500 : 1000);
+                    } else {
+                      // After 3 attempts, show loading state (will update when FILTERED_LEADS_DATA arrives)
+                      setAppState(AppState.Loading);
+                    }
+                  }
+                });
+              };
+              
+              // Start polling immediately
+              queryStatus(1);
             }
           }
         });
@@ -354,16 +534,40 @@ const App: React.FC = () => {
       
       if (newState) {
         setAppState(AppState.AutoContact);
-        chrome.runtime.sendMessage({ type: 'ENABLE_AUTO_CONTACT' });
-        // Reset stats when enabling
-        setAutoContactStats({
-          totalContacted: 0,
-          totalFiltered: 0,
-          sessionStartTime: Date.now()
+        chrome.runtime.sendMessage({ type: 'ENABLE_AUTO_CONTACT' }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn('ENABLE_AUTO_CONTACT error:', chrome.runtime.lastError.message);
+            // Revert UI state on error
+            setAutoContactEnabled(false);
+            setAppState(AppState.LeadsScraped);
+          } else if (response?.success) {
+            // Reset stats when enabling
+            setAutoContactStats({
+              totalContacted: 0,
+              totalFiltered: 0,
+              sessionStartTime: Date.now()
+            });
+          }
         });
       } else {
         setAppState(AppState.LeadsScraped);
-        chrome.runtime.sendMessage({ type: 'DISABLE_AUTO_CONTACT' });
+        chrome.runtime.sendMessage({ type: 'DISABLE_AUTO_CONTACT' }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.warn('DISABLE_AUTO_CONTACT error:', chrome.runtime.lastError.message);
+            // Revert UI state on error
+            setAutoContactEnabled(true);
+            setAppState(AppState.AutoContact);
+          } else {
+            // Verify state is disabled by querying background
+            chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (statusResponse) => {
+              if (statusResponse?.success && statusResponse.autoContactEnabled !== false) {
+                console.warn('[Popup] State mismatch detected, syncing...');
+                setAutoContactEnabled(statusResponse.autoContactEnabled);
+                setAppState(statusResponse.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
+              }
+            });
+          }
+        });
       }
     }
   };
@@ -394,49 +598,119 @@ const App: React.FC = () => {
 
   // Load filter config from storage
   const loadFilterConfig = async () => {
-    if (typeof chrome === 'undefined' || !chrome.storage?.local) return;
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      console.warn('[Popup] Chrome storage not available');
+      return;
+    }
 
-      try {
-        const result = await chrome.storage.local.get([
-          'indiamart_filter_keywords', 
-          'indiamart_filter_categories',
-          'indiamart_filter_quantity',
-          'indiamart_filter_order_value'
-        ]);
-        
-        if (Array.isArray(result.indiamart_filter_keywords) && result.indiamart_filter_keywords.length > 0) {
-          setKeywords(result.indiamart_filter_keywords);
-        } else {
-          // Use defaults if not in storage
-          setKeywords(filterCriteria?.keywords || []);
-        }
+    try {
+      const result = await chrome.storage.local.get([
+        'indiamart_filter_keywords', 
+        'indiamart_filter_categories',
+        'indiamart_filter_quantity',
+        'indiamart_filter_order_value'
+      ]);
 
-        if (Array.isArray(result.indiamart_filter_categories) && result.indiamart_filter_categories.length > 0) {
-          setCategories(result.indiamart_filter_categories);
-        } else {
-          // Use defaults if not in storage
-          setCategories(filterCriteria?.categories || []);
-        }
+      console.log('[Popup] Loaded filter config from storage:', {
+        hasKeywords: result.indiamart_filter_keywords !== undefined,
+        hasCategories: result.indiamart_filter_categories !== undefined,
+        hasQuantity: result.indiamart_filter_quantity !== undefined,
+        hasOrderValue: result.indiamart_filter_order_value !== undefined,
+      });
 
-        // Load quantity threshold
-        if (result.indiamart_filter_quantity && typeof result.indiamart_filter_quantity === 'object') {
-          const qty = result.indiamart_filter_quantity;
-          if (typeof qty.min === 'number') setQuantityMin(String(qty.min));
-          if (typeof qty.unit === 'string') setQuantityUnit(qty.unit);
-        } else if (filterCriteria?.quantity) {
-          setQuantityMin(String(filterCriteria.quantity.min || 100));
+      // Default keywords and categories (same as content script defaults)
+      const DEFAULT_KEYWORDS = [
+        'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'school jackets', 'nurse uniform',
+        'chef coats', 'coat', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
+        'kids school uniform', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
+        'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety suits',
+        'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms'
+      ];
+      const DEFAULT_CATEGORIES = [
+        'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
+        'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
+        'safety suits', 'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
+        'school jackets'
+      ];
+      // const DEFAULT_KEYWORDS = [
+      //   'uniform', 'uniform fabric' 
+      // ];
+      // const DEFAULT_CATEGORIES = [
+      //   'uniform' 
+      // ];
+
+      // Load keywords - prioritize storage, fallback to filterCriteria, then defaults
+      if (Array.isArray(result.indiamart_filter_keywords) && result.indiamart_filter_keywords.length > 0) {
+        setKeywords(result.indiamart_filter_keywords);
+        console.log('[Popup] ✅ Loaded keywords from storage:', result.indiamart_filter_keywords.length);
+      } else if (filterCriteria?.keywords && filterCriteria.keywords.length > 0) {
+        setKeywords(filterCriteria.keywords);
+        console.log('[Popup] ✅ Loaded keywords from filterCriteria:', filterCriteria.keywords.length);
+      } else {
+        // Use defaults and save them to storage
+        setKeywords(DEFAULT_KEYWORDS);
+        console.log('[Popup] ⚠️ No keywords found, using defaults and saving to storage');
+        chrome.storage.local.set({ 'indiamart_filter_keywords': DEFAULT_KEYWORDS });
+      }
+
+      // Load categories - prioritize storage, fallback to filterCriteria, then defaults
+      if (Array.isArray(result.indiamart_filter_categories) && result.indiamart_filter_categories.length > 0) {
+        setCategories(result.indiamart_filter_categories);
+        console.log('[Popup] ✅ Loaded categories from storage:', result.indiamart_filter_categories.length);
+      } else if (filterCriteria?.categories && filterCriteria.categories.length > 0) {
+        setCategories(filterCriteria.categories);
+        console.log('[Popup] ✅ Loaded categories from filterCriteria:', filterCriteria.categories.length);
+      } else {
+        // Use defaults and save them to storage
+        setCategories(DEFAULT_CATEGORIES);
+        console.log('[Popup] ⚠️ No categories found, using defaults and saving to storage');
+        chrome.storage.local.set({ 'indiamart_filter_categories': DEFAULT_CATEGORIES });
+      }
+
+      // Load quantity threshold - prioritize storage, fallback to filterCriteria, then defaults
+      if (result.indiamart_filter_quantity && typeof result.indiamart_filter_quantity === 'object' && typeof result.indiamart_filter_quantity.min === 'number') {
+        const qty = result.indiamart_filter_quantity;
+        setQuantityMin(String(qty.min || 20));
+        setQuantityUnit(qty.unit || 'piece');
+        console.log('[Popup] ✅ Loaded quantity from storage:', qty.min, qty.unit);
+      } else if (filterCriteria?.quantity && typeof filterCriteria.quantity.min === 'number') {
+        setQuantityMin(String(filterCriteria.quantity.min || 20));
+        setQuantityUnit(filterCriteria.quantity.unit || 'piece');
+        console.log('[Popup] ✅ Loaded quantity from filterCriteria:', filterCriteria.quantity.min);
+      } else {
+        // Use defaults
+        setQuantityMin('20');
+        setQuantityUnit('piece');
+        console.log('[Popup] ⚠️ No quantity found, using defaults');
+      }
+
+      // Load order value minimum - prioritize storage, fallback to filterCriteria, then defaults
+      if (typeof result.indiamart_filter_order_value === 'number' && result.indiamart_filter_order_value > 0) {
+        setOrderValue(String(result.indiamart_filter_order_value));
+        console.log('[Popup] ✅ Loaded order value from storage:', result.indiamart_filter_order_value);
+      } else if (typeof filterCriteria?.orderValueMin === 'number' && filterCriteria.orderValueMin > 0) {
+        setOrderValue(String(filterCriteria.orderValueMin));
+        console.log('[Popup] ✅ Loaded order value from filterCriteria:', filterCriteria.orderValueMin);
+      } else {
+        // Use defaults
+        setOrderValue('5000');
+        console.log('[Popup] ⚠️ No order value found, using defaults');
+      }
+    } catch (error) {
+      console.error('[Popup] Error loading filter config:', error);
+      // On error, try to use filterCriteria as fallback
+      if (filterCriteria) {
+        if (filterCriteria.keywords) setKeywords(filterCriteria.keywords);
+        if (filterCriteria.categories) setCategories(filterCriteria.categories);
+        if (filterCriteria.quantity) {
+          setQuantityMin(String(filterCriteria.quantity.min || 20));
           setQuantityUnit(filterCriteria.quantity.unit || 'piece');
         }
-
-        // Load order value minimum
-        if (typeof result.indiamart_filter_order_value === 'number') {
-          setOrderValue(String(result.indiamart_filter_order_value));
-        } else if (typeof filterCriteria?.orderValueMin === 'number') {
+        if (typeof filterCriteria.orderValueMin === 'number') {
           setOrderValue(String(filterCriteria.orderValueMin));
         }
-      } catch (error) {
-        console.error('Error loading filter config:', error);
       }
+    }
   };
 
   // Save filter config to storage and notify content script
@@ -711,12 +985,27 @@ const App: React.FC = () => {
     event.target.value = '';
   };
 
-  // Load config when settings panel opens
+  // Load config when settings panel opens or when filterCriteria updates
   useEffect(() => {
     if (showSettings) {
+      // Load immediately when settings panel opens
+      loadFilterConfig();
+      
+      // Also retry loading after a short delay in case storage wasn't ready
+      const retryTimer = setTimeout(() => {
+        loadFilterConfig();
+      }, 500);
+      
+      return () => clearTimeout(retryTimer);
+    }
+  }, [showSettings]);
+  
+  // Also reload when filterCriteria changes (from content script)
+  useEffect(() => {
+    if (showSettings && filterCriteria) {
       loadFilterConfig();
     }
-  }, [showSettings, filterCriteria]);
+  }, [filterCriteria]);
 
   useEffect(() => {
     agentStoppedRef.current = agentStopped;
