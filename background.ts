@@ -18,11 +18,6 @@ let autoContactState = {
 
 let agentActive = false;
 let latestLeadsPayload: { allLeads: Lead[]; filteredLeads: Lead[]; autoContactEnabled?: boolean } | null = null;
-let logProcessingAlarmActive = false;
-let lastSuccessfulLogTime = 0; // Track last successful log save
-const DIAGNOSTICS_KEY = 'indiamart_diagnostics';
-const MAX_LOG_LINES = 1000;
-const DIAGNOSTICS_ENABLED = false; // default off for main logs cleanliness
 let lastInactivityNotify = 0;
 const BUY_LEAD_SUSPENSION_KEY = 'indiamart_buylead_suspension';
 const RESUME_ALARM_NAME = 'resumeAutoContact';
@@ -66,63 +61,6 @@ const notify = async (id: string, title: string, message: string) => {
   } catch {}
 };
 
-// Save inactivity log entry directly from background script
-const saveInactivityLog = async (inactiveDurationSeconds: number): Promise<void> => {
-  try {
-    const timestamp = new Date().toISOString();
-    const dateStr = new Date().toLocaleString();
-    const minutes = Math.floor(inactiveDurationSeconds / 60);
-    const seconds = inactiveDurationSeconds % 60;
-    if (!DIAGNOSTICS_ENABLED) {
-      return; // Do not write inactivity into main logs by default
-    }
-
-    // Get existing diagnostics
-    const result = await chrome.storage.local.get(DIAGNOSTICS_KEY);
-    const existingDiag: string = result[DIAGNOSTICS_KEY] || '';
-
-    // Create inactivity log entry (diagnostics only)
-    const logEntry = `\n[${timestamp}] [Background] ⚠️ Inactive: background running; waiting for page visibility. Gap ${minutes}m ${seconds}s.\n`;
-    const combined = existingDiag + logEntry;
-    
-    // Maintain rolling history
-    const logLines = combined.split('\n');
-    const trimmed = logLines.slice(-MAX_LOG_LINES).join('\n');
-
-    // Save to storage
-    await chrome.storage.local.set({ [DIAGNOSTICS_KEY]: trimmed });
-  } catch (error) {
-    console.error('[Background] Error saving inactivity log:', error);
-  }
-};
-
-// Setup Chrome Alarm for periodic log processing (heartbeat - keeps service worker alive)
-const setupLogProcessingAlarm = () => {
-  if (logProcessingAlarmActive) {
-    return; // Already set up
-  }
-
-  // Initialize last successful log time
-  lastSuccessfulLogTime = Date.now();
-
-  // Create alarm that fires every 30 seconds (0.5 minutes) - acts as heartbeat
-  // Note: Chrome may throttle to minimum 1 minute, but we try 30 seconds first
-  chrome.alarms.create('processLeadsForLogs', {
-    periodInMinutes: 0.5 // 30 seconds - acts as heartbeat
-  });
-
-  logProcessingAlarmActive = true;
-  console.log('[Background] Heartbeat alarm set up - will trigger every 30 seconds (keeps service worker alive)');
-};
-
-// Clear the alarm when auto-contact is disabled
-const clearLogProcessingAlarm = () => {
-  if (logProcessingAlarmActive) {
-    chrome.alarms.clear('processLeadsForLogs');
-    logProcessingAlarmActive = false;
-    console.log('[Background] Log processing alarm cleared');
-  }
-};
 
 const calculateNextMidnight = (): number => {
   const now = new Date();
@@ -135,14 +73,13 @@ const calculateNextMidnight = (): number => {
 const scheduleResumeAlarm = (resumeAt: number) => {
   chrome.alarms.clear(RESUME_ALARM_NAME);
   chrome.alarms.create(RESUME_ALARM_NAME, { when: resumeAt });
-  console.log(`[Background] Scheduled resume alarm for ${new Date(resumeAt).toLocaleString()}`);
 };
 
 const persistSuspensionState = async () => {
   try {
     await chrome.storage.local.set({ [BUY_LEAD_SUSPENSION_KEY]: suspensionState });
   } catch (error) {
-    console.error('[Background] Failed to persist suspension state:', error);
+    // Failed to persist suspension state
   }
 };
 
@@ -151,7 +88,7 @@ const clearSuspensionState = async () => {
   try {
     await chrome.storage.local.remove(BUY_LEAD_SUSPENSION_KEY);
   } catch (error) {
-    console.error('[Background] Failed to clear suspension state:', error);
+    // Failed to clear suspension state
   }
 };
 
@@ -177,7 +114,6 @@ const suspendAutomationForZeroBalance = async () => {
   autoContactState.stopped = true;
   agentActive = false;
   latestLeadsPayload = null;
-  clearLogProcessingAlarm();
   setBadge('PA', 'BuyLead balance 0 - paused', '#f97316');
 
   await persistSuspensionState();
@@ -193,7 +129,6 @@ const suspendAutomationForZeroBalance = async () => {
 
   sendMessageSafe({ type: 'BUY_LEAD_BALANCE_SUSPENDED', resumeAt });
   notify('indiamart-buylead-suspended', 'IndiaMART Agent paused', 'BuyLead balance is zero. Automation will resume at midnight.');
-  console.warn('[Background] Automation suspended due to zero BuyLead balance until midnight.');
 };
 
 const resumeAutomationFromSuspension = async () => {
@@ -210,7 +145,6 @@ const resumeAutomationFromSuspension = async () => {
     autoContactState.enabled = true;
     autoContactState.stopped = false;
     autoContactState.statistics.sessionStartTime = Date.now();
-    setupLogProcessingAlarm();
 
     chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
       tabs.forEach((tab) => {
@@ -222,7 +156,6 @@ const resumeAutomationFromSuspension = async () => {
 
     sendMessageSafe({ type: 'BUY_LEAD_BALANCE_RESUMED', restored: true });
     notify('indiamart-buylead-resumed', 'IndiaMART Agent resumed', 'Automation restarted after BuyLead balance suspension.');
-    console.log('[Background] Automation resumed automatically after zero balance suspension.');
   } else {
     sendMessageSafe({ type: 'BUY_LEAD_BALANCE_RESUMED', restored: false });
     notify('indiamart-buylead-resumed', 'IndiaMART Agent ready', 'BuyLead balance suspension ended. Automation remains paused.');
@@ -244,71 +177,15 @@ const initializeSuspensionState = async () => {
     } else {
       scheduleResumeAlarm(resumeAt);
       setBadge('PA', 'BuyLead balance 0 - paused', '#f97316');
-      console.warn('[Background] Suspension state restored. Automation paused until resume alarm fires.');
     }
   } catch (error) {
-    console.error('[Background] Failed to initialize suspension state:', error);
+    // Failed to initialize suspension state
   }
 };
 
-// Listen for alarm events (Heartbeat - keeps service worker alive)
+// Listen for alarm events
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === 'processLeadsForLogs') {
-    // Heartbeat alarm fires - keeps service worker alive
-    if (autoContactState.enabled && !autoContactState.stopped) {
-      chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
-        if (tabs.length === 0) {
-          // No tabs found - log inactivity
-          const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
-          if (timeSinceLastLog > 30000) { // Only log if more than 30 seconds
-            saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
-            if (Date.now() - lastInactivityNotify > 5 * 60 * 1000) {
-              notify('indiamart-inactive', 'IndiaMART Agent: Inactive', 'Tab inactive. Waiting for visibility to resume processing.');
-              setBadge('!', 'Inactive: waiting for tab focus', '#ef4444');
-              lastInactivityNotify = Date.now();
-            }
-          }
-          return;
-        }
-
-        let activeTabFound = false;
-        tabs.forEach(tab => {
-          if (!tab.id) return;
-
-          if (tab.active) {
-            activeTabFound = true;
-          }
-
-          chrome.tabs.sendMessage(tab.id, { type: 'PROCESS_LEADS_FOR_LOGS' }, () => {
-            if (chrome.runtime.lastError) {
-              // Tab might be inactive, throttled, or content script not ready
-              const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
-              if (timeSinceLastLog > 60000) { // Only log if more than 1 minute
-                saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
-              }
-              console.debug('[Background] Could not send PROCESS_LEADS_FOR_LOGS:', chrome.runtime.lastError.message);
-            } else {
-              // Successfully communicated - content will emit LOGS_UPDATED if something actually changed
-              lastSuccessfulLogTime = Date.now();
-            }
-          });
-        });
-
-        // If no active tab found, check if we should log inactivity
-        if (!activeTabFound) {
-          const timeSinceLastLog = Date.now() - lastSuccessfulLogTime;
-          if (timeSinceLastLog > 60000) { // Only log if more than 1 minute
-            saveInactivityLog(Math.floor(timeSinceLastLog / 1000));
-            if (Date.now() - lastInactivityNotify > 5 * 60 * 1000) {
-              notify('indiamart-inactive', 'IndiaMART Agent: Inactive', 'No active tab found. Waiting for visibility.');
-              setBadge('!', 'Inactive: no tab found', '#ef4444');
-              lastInactivityNotify = Date.now();
-            }
-          }
-        }
-      });
-    }
-  } else if (alarm.name === RESUME_ALARM_NAME) {
+  if (alarm.name === RESUME_ALARM_NAME) {
     void resumeAutomationFromSuspension();
   }
 });
@@ -320,15 +197,10 @@ const sendMessageSafe = (message: unknown) => {
 
   try {
     chrome.runtime.sendMessage(message, () => {
-      const error = chrome.runtime.lastError;
-      if (error && !error.message?.includes('Receiving end does not exist')) {
-        console.warn('[Background] sendMessage error:', error.message);
-      }
+      // Message sent (ignore errors about no receiving end)
     });
   } catch (error) {
-    if (error instanceof Error) {
-      console.warn('[Background] sendMessage threw:', error.message);
-    }
+    // Failed to send message
   }
 };
 
@@ -361,9 +233,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       autoContactState.statistics.sessionStartTime = Date.now();
       agentActive = false;
       latestLeadsPayload = null;
-      
-      // Setup alarm for periodic log processing
-      setupLogProcessingAlarm();
       
       const enableAutoContact = (tabId: number) => {
         // Wait a bit for content script to be ready, then enable auto-contact
@@ -412,9 +281,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     autoContactState.stopped = false;
     autoContactState.statistics.sessionStartTime = Date.now();
     
-    // Setup alarm for periodic log processing
-    setupLogProcessingAlarm();
-    
     // Forward to all active IndiaMART tabs
     chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
       tabs.forEach(tab => {
@@ -429,9 +295,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'DISABLE_AUTO_CONTACT') {
     autoContactState.enabled = false;
     autoContactState.stopped = false;
-    
-    // Clear alarm when auto-contact is disabled
-    clearLogProcessingAlarm();
     
     // Forward to all active IndiaMART tabs
     chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
@@ -451,7 +314,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     suspendAutomationForZeroBalance()
       .then(() => sendResponse({ success: true }))
       .catch((error) => {
-        console.error('[Background] Failed to suspend automation:', error);
         sendResponse({ success: false, error: (error as Error)?.message });
       });
     return true;
@@ -483,9 +345,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     autoContactState.stopped = true;
     agentActive = false;
     latestLeadsPayload = null;
-    
-    // Clear alarm when agent is stopped
-    clearLogProcessingAlarm();
     
     // Forward to all active IndiaMART tabs
     chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
@@ -523,39 +382,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true, state: autoContactState });
     return true;
   } else if (message.type === 'GET_AGENT_STATUS') {
-    // Load contacted leads from storage
-    const CONTACT_SUCCESS_KEY = 'indiamart_contact_successes';
-    chrome.storage.local.get([CONTACT_SUCCESS_KEY], (stored) => {
-      let contactedLeads: any[] = [];
-      try {
-        if (stored[CONTACT_SUCCESS_KEY] && Array.isArray(stored[CONTACT_SUCCESS_KEY])) {
-          contactedLeads = stored[CONTACT_SUCCESS_KEY];
-        }
-      } catch (error) {
-        console.error('[Background] Error loading contacted leads:', error);
-      }
-      
-      sendResponse({
-        success: true,
-        agentActive,
-        agentStopped: autoContactState.stopped,
-        autoContactEnabled: autoContactState.enabled,
-        statistics: autoContactState.statistics,
-        leadsPayload: latestLeadsPayload,
-        dailyStats: dailyStatsCache,
-        contactedLeads, // Include contacted leads from storage
-      });
+    sendResponse({
+      success: true,
+      agentActive,
+      agentStopped: autoContactState.stopped,
+      autoContactEnabled: autoContactState.enabled,
+      statistics: autoContactState.statistics,
+      leadsPayload: latestLeadsPayload,
+      dailyStats: dailyStatsCache,
     });
-    return true; // Keep channel open for async response
-  } else if (message.type === 'LOG_PROCESSING_SUCCESS') {
-    // Content script processed, but we only notify UI on actual change (LOGS_UPDATED)
-    lastSuccessfulLogTime = Date.now();
-    return true;
-  } else if (message.type === 'LOGS_UPDATED') {
-    // A real change was saved; update badge and notify once per change
-    lastSuccessfulLogTime = Date.now();
-    setBadge('OK', `Last update: ${new Date().toLocaleTimeString()}`, '#16a34a');
-    notify('indiamart-update', 'IndiaMART Agent: Logs updated', `Updated at ${new Date().toLocaleTimeString()}`);
     return true;
   } else if (message.type === 'DAILY_CONTACT_STATS') {
     dailyStatsCache = message.payload ?? null;
@@ -599,17 +434,15 @@ function injectScript(tabId: number) {
     }).catch((error) => {
       // Ignore errors about already injected scripts
       if (!error.message?.includes('Cannot access a chrome')) {
-        console.log('Content script injection handled:', error.message);
+        // Content script injection handled
       }
       agentActive = false;
     }).then(() => {
       if (chrome.runtime.lastError) {
-        console.error('Script injection failed: ', chrome.runtime.lastError.message);
         // Send an error message back to the popup
         sendMessageSafe({ type: 'SCRAPING_ERROR', error: `Failed to inject script: ${chrome.runtime.lastError.message}` });
         agentActive = false;
       } else {
-        console.log('Content script injected successfully');
         agentActive = true;
         sendMessageSafe({ type: 'AGENT_READY' });
         

@@ -4,8 +4,6 @@
 import React, { useState, useEffect } from 'react';
 import type { Lead } from './types';
 import { LeadCard } from './components/LeadCard';
-import { LogsPanel } from './components/LogsPanel';
-import { SuccessPanel } from './components/SuccessPanel';
 
 enum AppState {
   Idle,
@@ -65,8 +63,6 @@ const App: React.FC = () => {
   const [showFilterDetails, setShowFilterDetails] = useState(false);
   const [agentInitialized, setAgentInitialized] = useState(false);
   const agentStoppedRef = React.useRef(false);
-  const [showLogs, setShowLogs] = useState(false);
-  const [showSuccess, setShowSuccess] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [filterCriteria, setFilterCriteria] = useState<FilterCriteria | null>(null);
   const [cycleSummary, setCycleSummary] = useState<CycleSummary | null>(null);
@@ -118,7 +114,6 @@ const App: React.FC = () => {
             ];
             const hasFilterChange = filterKeys.some(key => changes[key]);
             if (hasFilterChange && showSettings) {
-              console.log('[Popup] Storage changed, reloading filter config...');
               loadFilterConfig();
             }
           }
@@ -453,7 +448,6 @@ const App: React.FC = () => {
         
         chrome.runtime.sendMessage({ type: 'START_AGENT' }, (response) => {
           if (chrome.runtime.lastError) {
-            console.error('START_AGENT error:', chrome.runtime.lastError.message);
             setError('Failed to start agent. Please try again.');
             setAppState(AppState.Error);
             // Revert optimistic state on error
@@ -536,7 +530,6 @@ const App: React.FC = () => {
         setAppState(AppState.AutoContact);
         chrome.runtime.sendMessage({ type: 'ENABLE_AUTO_CONTACT' }, (response) => {
           if (chrome.runtime.lastError) {
-            console.warn('ENABLE_AUTO_CONTACT error:', chrome.runtime.lastError.message);
             // Revert UI state on error
             setAutoContactEnabled(false);
             setAppState(AppState.LeadsScraped);
@@ -553,7 +546,6 @@ const App: React.FC = () => {
         setAppState(AppState.LeadsScraped);
         chrome.runtime.sendMessage({ type: 'DISABLE_AUTO_CONTACT' }, (response) => {
           if (chrome.runtime.lastError) {
-            console.warn('DISABLE_AUTO_CONTACT error:', chrome.runtime.lastError.message);
             // Revert UI state on error
             setAutoContactEnabled(true);
             setAppState(AppState.AutoContact);
@@ -561,7 +553,6 @@ const App: React.FC = () => {
             // Verify state is disabled by querying background
             chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (statusResponse) => {
               if (statusResponse?.success && statusResponse.autoContactEnabled !== false) {
-                console.warn('[Popup] State mismatch detected, syncing...');
                 setAutoContactEnabled(statusResponse.autoContactEnabled);
                 setAppState(statusResponse.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
               }
@@ -582,15 +573,7 @@ const App: React.FC = () => {
       setAppState(AppState.Idle);
 
       chrome.runtime.sendMessage({ type: 'DISABLE_AUTO_CONTACT' }, () => {
-        const disableError = chrome.runtime.lastError;
-        if (disableError) {
-          console.warn('DISABLE_AUTO_CONTACT error:', disableError.message);
-        }
         chrome.runtime.sendMessage({ type: 'STOP_AGENT' }, () => {
-          const stopError = chrome.runtime.lastError;
-          if (stopError) {
-            console.warn('STOP_AGENT error:', stopError.message);
-          }
         });
       });
     }
@@ -599,7 +582,6 @@ const App: React.FC = () => {
   // Load filter config from storage
   const loadFilterConfig = async () => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-      console.warn('[Popup] Chrome storage not available');
       return;
     }
 
@@ -610,13 +592,6 @@ const App: React.FC = () => {
         'indiamart_filter_quantity',
         'indiamart_filter_order_value'
       ]);
-
-      console.log('[Popup] Loaded filter config from storage:', {
-        hasKeywords: result.indiamart_filter_keywords !== undefined,
-        hasCategories: result.indiamart_filter_categories !== undefined,
-        hasQuantity: result.indiamart_filter_quantity !== undefined,
-        hasOrderValue: result.indiamart_filter_order_value !== undefined,
-      });
 
       // Default keywords and categories (same as content script defaults)
       const DEFAULT_KEYWORDS = [
@@ -642,28 +617,22 @@ const App: React.FC = () => {
       // Load keywords - prioritize storage, fallback to filterCriteria, then defaults
       if (Array.isArray(result.indiamart_filter_keywords) && result.indiamart_filter_keywords.length > 0) {
         setKeywords(result.indiamart_filter_keywords);
-        console.log('[Popup] ✅ Loaded keywords from storage:', result.indiamart_filter_keywords.length);
       } else if (filterCriteria?.keywords && filterCriteria.keywords.length > 0) {
         setKeywords(filterCriteria.keywords);
-        console.log('[Popup] ✅ Loaded keywords from filterCriteria:', filterCriteria.keywords.length);
       } else {
         // Use defaults and save them to storage
         setKeywords(DEFAULT_KEYWORDS);
-        console.log('[Popup] ⚠️ No keywords found, using defaults and saving to storage');
         chrome.storage.local.set({ 'indiamart_filter_keywords': DEFAULT_KEYWORDS });
       }
 
       // Load categories - prioritize storage, fallback to filterCriteria, then defaults
       if (Array.isArray(result.indiamart_filter_categories) && result.indiamart_filter_categories.length > 0) {
         setCategories(result.indiamart_filter_categories);
-        console.log('[Popup] ✅ Loaded categories from storage:', result.indiamart_filter_categories.length);
       } else if (filterCriteria?.categories && filterCriteria.categories.length > 0) {
         setCategories(filterCriteria.categories);
-        console.log('[Popup] ✅ Loaded categories from filterCriteria:', filterCriteria.categories.length);
       } else {
         // Use defaults and save them to storage
         setCategories(DEFAULT_CATEGORIES);
-        console.log('[Popup] ⚠️ No categories found, using defaults and saving to storage');
         chrome.storage.local.set({ 'indiamart_filter_categories': DEFAULT_CATEGORIES });
       }
 
@@ -672,32 +641,25 @@ const App: React.FC = () => {
         const qty = result.indiamart_filter_quantity;
         setQuantityMin(String(qty.min || 20));
         setQuantityUnit(qty.unit || 'piece');
-        console.log('[Popup] ✅ Loaded quantity from storage:', qty.min, qty.unit);
       } else if (filterCriteria?.quantity && typeof filterCriteria.quantity.min === 'number') {
         setQuantityMin(String(filterCriteria.quantity.min || 20));
         setQuantityUnit(filterCriteria.quantity.unit || 'piece');
-        console.log('[Popup] ✅ Loaded quantity from filterCriteria:', filterCriteria.quantity.min);
       } else {
         // Use defaults
         setQuantityMin('20');
         setQuantityUnit('piece');
-        console.log('[Popup] ⚠️ No quantity found, using defaults');
       }
 
       // Load order value minimum - prioritize storage, fallback to filterCriteria, then defaults
       if (typeof result.indiamart_filter_order_value === 'number' && result.indiamart_filter_order_value > 0) {
         setOrderValue(String(result.indiamart_filter_order_value));
-        console.log('[Popup] ✅ Loaded order value from storage:', result.indiamart_filter_order_value);
       } else if (typeof filterCriteria?.orderValueMin === 'number' && filterCriteria.orderValueMin > 0) {
         setOrderValue(String(filterCriteria.orderValueMin));
-        console.log('[Popup] ✅ Loaded order value from filterCriteria:', filterCriteria.orderValueMin);
       } else {
         // Use defaults
         setOrderValue('5000');
-        console.log('[Popup] ⚠️ No order value found, using defaults');
       }
     } catch (error) {
-      console.error('[Popup] Error loading filter config:', error);
       // On error, try to use filterCriteria as fallback
       if (filterCriteria) {
         if (filterCriteria.keywords) setKeywords(filterCriteria.keywords);
@@ -763,7 +725,6 @@ const App: React.FC = () => {
 
       if (Object.keys(toSave).length > 0) {
         await chrome.storage.local.set(toSave);
-        console.log('[Popup] Filter config saved to storage:', toSave);
         
         // Small delay to ensure storage is committed before notifying content script
         await new Promise(resolve => setTimeout(resolve, 100));
@@ -771,19 +732,12 @@ const App: React.FC = () => {
         // Notify content script to reload
         chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
           if (tabs.length === 0) {
-            console.warn('[Popup] No IndiaMART tabs found to notify');
             return;
           }
           
           tabs.forEach(tab => {
             if (tab.id) {
-              chrome.tabs.sendMessage(tab.id, { type: 'FILTER_KEYWORDS_UPDATED' }, (response) => {
-                if (chrome.runtime.lastError) {
-                  console.warn('[Popup] Failed to notify tab', tab.id, ':', chrome.runtime.lastError.message);
-                } else {
-                  console.log('[Popup] Successfully notified tab', tab.id, 'about filter update');
-                }
-              });
+              chrome.tabs.sendMessage(tab.id, { type: 'FILTER_KEYWORDS_UPDATED' });
             }
           });
         });
@@ -795,7 +749,6 @@ const App: React.FC = () => {
 
       return false;
     } catch (error) {
-      console.error('Error saving filter config:', error);
       setSettingsMessage({ type: 'error', text: 'Failed to save filter settings.' });
       setTimeout(() => setSettingsMessage(null), 3000);
       return false;
@@ -872,7 +825,6 @@ const App: React.FC = () => {
         setTimeout(() => setSettingsMessage(null), 3000);
       }
     } catch (error) {
-      console.error('Error updating quantity:', error);
       setSettingsMessage({ type: 'error', text: 'Error saving quantity threshold.' });
       setTimeout(() => setSettingsMessage(null), 3000);
     }
@@ -895,7 +847,6 @@ const App: React.FC = () => {
         setTimeout(() => setSettingsMessage(null), 3000);
       }
     } catch (error) {
-      console.error('Error updating order value:', error);
       setSettingsMessage({ type: 'error', text: 'Error saving order value threshold.' });
       setTimeout(() => setSettingsMessage(null), 3000);
     }
@@ -976,7 +927,6 @@ const App: React.FC = () => {
       setSettingsMessage({ type: 'success', text: 'Configuration imported successfully!' });
       setTimeout(() => setSettingsMessage(null), 3000);
     } catch (error) {
-      console.error('Error importing config:', error);
       setSettingsMessage({ type: 'error', text: 'Failed to import configuration. Please check file format.' });
       setTimeout(() => setSettingsMessage(null), 3000);
     }
@@ -1296,18 +1246,6 @@ const App: React.FC = () => {
         </div>
         <div className="mt-2 flex items-center gap-2">
           <button
-            onClick={() => setShowLogs((v) => !v)}
-            className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded-md"
-          >
-            {showLogs ? 'Hide Logs' : 'Show Logs'}
-          </button>
-          <button
-            onClick={() => setShowSuccess((v) => !v)}
-            className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded-md"
-          >
-            {showSuccess ? 'Hide Success' : 'Show Success'}
-          </button>
-          <button
             onClick={() => setShowSettings((v) => !v)}
             className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-700 text-white rounded-md"
           >
@@ -1316,14 +1254,6 @@ const App: React.FC = () => {
         </div>
       </header>
       <main>
-        {showLogs && (
-          <div className="border-b border-slate-800">
-            <LogsPanel onClose={() => setShowLogs(false)} />
-          </div>
-        )}
-        {showSuccess && (
-          <SuccessPanel onClose={() => setShowSuccess(false)} />
-        )}
         {showSettings && (
           <div className="border-b border-slate-800 p-4 bg-slate-900 max-h-[500px] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
