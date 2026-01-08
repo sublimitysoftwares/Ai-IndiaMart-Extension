@@ -1,10 +1,51 @@
 /// <reference types="chrome" />
 import type { Lead } from './types';
+import { GLOBAL_FLAG } from './constants';
+import {
+  LEAD_CARD_SELECTORS,
+  CONTACT_BUTTON_TEXT,
+  SEND_REPLY_TEXT,
+  SEND_REPLY_SELECTOR,
+  SEND_REPLY_BUTTON_SELECTORS,
+  ZERO_BALANCE_REGEXES,
+} from './constants/selectors';
+import {
+  SCRAPE_INTERVAL_MS,
+  SCRAPE_MAX_ATTEMPTS,
+  WORKING_HOURS,
+  WORKING_REFRESH_RANGE_MINUTES,
+  OFF_HOURS_REFRESH_RANGE_MINUTES,
+  MIN_LEAD_TARGET,
+  AUTO_SCROLL_MAX_ATTEMPTS,
+  AUTO_SCROLL_DELAY_MS,
+  AUTO_SCROLL_COOLDOWN_MS,
+  MAX_SCROLL_TIME_MS,
+  BACKOFF_ERROR_THRESHOLD,
+  BACKOFF_WINDOW_MS,
+  BACKOFF_MIN_DELAY_MS,
+  BACKOFF_MAX_DELAY_MS,
+  CONTACT_HISTORY_RETENTION_MS,
+} from './constants/timing';
+import {
+  DEFAULT_ENQUIRY_KEYWORDS,
+  DEFAULT_ALLOWED_CATEGORIES,
+  INDIAN_STATES,
+  DEFAULT_QUANTITY_THRESHOLD,
+  DEFAULT_ORDER_VALUE_MIN,
+  CONTACT_HISTORY_WINDOW_DAYS,
+} from './constants/filters';
+import {
+  SKIPPED_LEADS_KEY,
+  FILTER_KEYWORDS_KEY,
+  FILTER_CATEGORIES_KEY,
+  FILTER_QUANTITY_KEY,
+  FILTER_ORDER_VALUE_KEY,
+  DAILY_CONTACT_STATS_KEY,
+} from './constants/storage';
+import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
 
 // Wrap everything in an IIFE to prevent redeclaration errors
 (() => {
-  const GLOBAL_FLAG = '__INDIAMART_AGENT_CONTENT__';
-  
   // Check if already loaded
   if ((window as any)[GLOBAL_FLAG]) {
     return;
@@ -12,47 +53,6 @@ import type { Lead } from './types';
   
   // Mark as loaded
   (window as any)[GLOBAL_FLAG] = true;
-
-  const LEAD_CARD_SELECTORS = [
-    'div.f1.lstNw',
-    'div.lstNw.lstNwDflx',
-    'div.lstNw.BUY_pr',
-    'div.bl-itm',
-    'div[class*="lead-card"]',
-    'li[class*="lead-card"]',
-    'div[data-card-type="lead"]',
-    '[data-testid*="lead"]',
-    '.lead-card',
-    '.blk-txn-card',
-  ];
-  const CONTACT_BUTTON_TEXT = 'Contact Buyer Now';
-  const SEND_REPLY_TEXT = 'Send Reply';
-  const SEND_REPLY_SELECTOR = '.btn-latest';
-  const SEND_REPLY_BUTTON_SELECTORS = [
-    '.btnCBNContainer .btnCBN1',
-    '.btnCBNContainer [onclick*="sendreply"]',
-    '.btnCBNContainer button[data-action*="send"]',
-    '.btnCBNContainer button[data-testid*="reply"]',
-    '[data-action="send-reply"]',
-    'button[id*="SendReply"]',
-    'button[class*="sendReply"]',
-    'button[aria-label*="send reply" i]',
-    'button[aria-label*="send message" i]',
-    '[role="button"][aria-label*="send reply" i]',
-    '[role="button"][aria-label*="send message" i]',
-    '.leadReplyBtn',
-  ];
-  const SCRAPE_INTERVAL_MS = 1000;
-  const SCRAPE_MAX_ATTEMPTS = 15;
-  const WORKING_HOURS = { start: 9, end: 21 }; // 9 AM – 9 PM
-  const WORKING_REFRESH_RANGE_MINUTES = { min: 5, max: 15 };
-  const OFF_HOURS_REFRESH_RANGE_MINUTES = { min: 65, max: 90 };
-  const MIN_LEAD_TARGET = 50; // desired minimum number of leads before processing
-  const AUTO_SCROLL_MAX_ATTEMPTS = 500; // Significantly increased to ensure reaching 50 leads
-  const AUTO_SCROLL_DELAY_MS = 1000; // 1 second per lead scrolling speed (target: 50 leads)
-  const AUTO_SCROLL_COOLDOWN_MS = 5 * 1000; // Reduced to 5 seconds to allow more frequent scrolling
-  const DEFAULT_CONTACT_MESSAGE = `Hello,\n\nWe supply premium-quality uniforms and would love to support your requirement. Please let us know the sizes and timelines so we can share the best quote.\n\nThanks,\nTeam IndiaMART Agent`;
-  const SKIPPED_LEADS_KEY = 'indiamart_skipped_leads'; // Storage key for skipped lead IDs
   
   // State management
   // Auto-contact enabled by default when extension starts
@@ -81,10 +81,6 @@ import type { Lead } from './types';
   let skippedLeads = new Set<string>(); // In-memory set of skipped lead IDs for fast lookups
   let backoffUntil = 0;
   const recentErrors: number[] = [];
-  const BACKOFF_ERROR_THRESHOLD = 3;
-  const BACKOFF_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
-  const BACKOFF_MIN_DELAY_MS = 5 * 60 * 1000;
-  const BACKOFF_MAX_DELAY_MS = 10 * 60 * 1000;
 
   const stopAutomationTimers = (): void => {
     if (pageRefreshTimer) {
@@ -1073,11 +1069,6 @@ import type { Lead } from './types';
   };
 
 
-  const ZERO_BALANCE_REGEXES = [
-    /buylead\s+balance\s*:?\s*0/i,
-    /buy\s*lead\s*balance\s*:?\s*0/i,
-    /buy\s*leads\s*balance\s*:?\s*0/i,
-  ];
 
   const detectZeroBalancePopup = (): boolean => {
     if (!document.body || zeroBalanceDetected) {
@@ -1258,7 +1249,6 @@ import type { Lead } from './types';
 
 
     const startTime = Date.now();
-    const MAX_SCROLL_TIME_MS = 300000; // 300 second (5 minute) timeout
     let attempt = 0;
     let previousCount = existing;
     let noProgressCount = 0; // Track consecutive attempts with no progress
@@ -1848,8 +1838,8 @@ import type { Lead } from './types';
   ];
 
   // Mutable filter arrays (loaded from storage on init)
-  let enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
-  let allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
+  let enquiryKeywords: string[] = [...DEFAULT_ENQUIRY_KEYWORDS];
+  let allowedCategories: string[] = [...DEFAULT_ALLOWED_CATEGORIES];
 
   // List of all Indian states for location validation
   const INDIAN_STATES = [
