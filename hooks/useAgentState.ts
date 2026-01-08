@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import type { AutoContactStats, AppState, DailyContactStatsSummary, CycleSummary } from '../types';
+import type { AutoContactStats, DailyContactStatsSummary, CycleSummary } from '../types';
+import { AppState } from '../types';
 import { sendMessage } from '../services/chrome/messaging';
 import { MESSAGE_TYPES } from '../constants';
 

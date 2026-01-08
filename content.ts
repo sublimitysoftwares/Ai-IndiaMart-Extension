@@ -43,6 +43,36 @@ import {
   DAILY_CONTACT_STATS_KEY,
 } from './constants/storage';
 import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
+import {
+  sanitize,
+  sanitizeOptional,
+  parseQuantity,
+  parseRupeeRange,
+  validateKeyword,
+  sanitizeKeyword,
+} from './utils/text';
+import {
+  delay,
+  randomBetween,
+  randomIntBetween,
+  describeScheduleWindow,
+  getStealthDelayMs,
+  getTodayIdentifier,
+} from './utils/time';
+import {
+  isElementVisible,
+  getInteractionContexts,
+  setElementValue,
+  findElementByText,
+  waitForElement,
+} from './utils/dom';
+import {
+  simulateMouseMove,
+  simulateHoverDelay,
+  simulatePostClickMovement,
+  humanScrollBy,
+  performHumanScrollPass,
+} from './utils/human';
 
 // Wrap everything in an IIFE to prevent redeclaration errors
 (() => {
@@ -122,18 +152,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     
   };
 
-  const randomBetween = (min: number, max: number): number => Math.random() * (max - min) + min;
-  const randomIntBetween = (min: number, max: number): number =>
-    Math.floor(randomBetween(min, max + 1));
-
-  const describeScheduleWindow = (isWorkingHours: boolean): string =>
-    isWorkingHours ? '09:00-21:00' : '21:00-09:00';
-
-  const getStealthDelayMs = (): number => {
-    // Fixed 30 second refresh interval
-    const delaySeconds = 30;
-    return delaySeconds * 1000; // 30 seconds in milliseconds
-  };
+  // Time utilities imported from utils/time
 
   const registerAutomationError = (reason: string) => {
     const now = Date.now();
@@ -184,77 +203,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     });
   };
 
-  const sanitize = (value?: string | null): string => (value || '').trim();
-  const sanitizeOptional = (value?: string | null): string | undefined => {
-    const cleaned = sanitize(value);
-    return cleaned || undefined;
-  };
-
-  const getInteractionContexts = (): (Document | ShadowRoot)[] => {
-    const contexts: (Document | ShadowRoot)[] = [document];
-    const iframes = Array.from(document.querySelectorAll<HTMLIFrameElement>('iframe'));
-    iframes.forEach((frame) => {
-      try {
-        const doc = frame.contentDocument;
-        if (doc) {
-          contexts.push(doc);
-        }
-      } catch (error) {
-      }
-    });
-    return contexts;
-  };
-
-  const simulateMouseMove = (element?: HTMLElement): void => {
-    const rect = element?.getBoundingClientRect();
-    const fallbackX = randomBetween(100, Math.max(120, window.innerWidth - 100));
-    const fallbackY = randomBetween(120, Math.max(140, window.innerHeight - 120));
-    const clientX = rect
-      ? rect.left + randomBetween(rect.width * 0.2, rect.width * 0.8)
-      : fallbackX;
-    const clientY = rect
-      ? rect.top + randomBetween(rect.height * 0.2, rect.height * 0.8)
-      : fallbackY;
-    const moveEvent = new MouseEvent('mousemove', {
-      bubbles: true,
-      cancelable: true,
-      clientX,
-      clientY,
-      movementX: randomBetween(-5, 5),
-      movementY: randomBetween(-5, 5),
-      view: window,
-    });
-    (element || document.body || document).dispatchEvent(moveEvent);
-  };
-
-  const simulateHoverDelay = async (element: HTMLElement): Promise<void> => {
-    const passes = randomIntBetween(2, 4);
-    for (let i = 0; i < passes; i++) {
-      simulateMouseMove(element);
-      await delay(randomBetween(80, 180));
-    }
-    await delay(randomBetween(400, 1200));
-  };
-
-  const simulatePostClickMovement = async (element?: HTMLElement): Promise<void> => {
-    await delay(randomBetween(200, 600));
-    simulateMouseMove(element);
-    await delay(randomBetween(120, 300));
-    simulateMouseMove();
-  };
-
-  const humanScrollBy = async (distance: number): Promise<void> => {
-    window.scrollBy({ top: distance, behavior: 'auto' });
-    simulateMouseMove();
-    await delay(500); // Fixed 500ms delay for consistent 1 second per lead timing
-  };
-
-  const performHumanScrollPass = async (): Promise<void> => {
-    // 1 second per lead scrolling - much larger distances to ensure reaching 50 leads
-    const distance = randomBetween(700, 1000); // Much larger scroll distance to cover more ground efficiently
-    await humanScrollBy(distance);
-    await delay(500); // Fixed 500ms delay to maintain 1 second per lead
-  };
+  // Text, DOM, and human utilities imported from utils/
 
   const pickRandomSkipIndexes = (total: number): Set<number> => {
     const skipCount = total <= 3 ? randomIntBetween(0, 1) : randomIntBetween(1, 2);
@@ -276,15 +225,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     await delay(waitMs);
   };
 
-  const isElementVisible = (element: HTMLElement | null | undefined): element is HTMLElement => {
-    if (!element) return false;
-    const style = window.getComputedStyle(element);
-    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
-      return false;
-    }
-    const rect = element.getBoundingClientRect();
-    return rect.width > 0 && rect.height > 0;
-  };
+  // DOM utilities imported from utils/dom
 
   let bridgeInstalled = false;
   const installClickBridge = (): void => {
@@ -468,29 +409,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     return null;
   };
 
-  const setElementValue = (element: HTMLElement, value: string): void => {
-    if ((element as HTMLTextAreaElement).value !== undefined) {
-      const control = element as HTMLTextAreaElement;
-      if (control.value && control.value.trim()) return;
-      control.focus();
-      control.value = value;
-      control.dispatchEvent(new Event('input', { bubbles: true }));
-      control.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if ((element as HTMLInputElement).value !== undefined) {
-      const control = element as HTMLInputElement;
-      if (control.value && control.value.trim()) return;
-      control.focus();
-      control.value = value;
-      control.dispatchEvent(new Event('input', { bubbles: true }));
-      control.dispatchEvent(new Event('change', { bubbles: true }));
-    } else if (element.isContentEditable) {
-      if (element.textContent && element.textContent.trim()) return;
-      element.focus();
-      element.textContent = value;
-      element.dispatchEvent(new Event('input', { bubbles: true }));
-      element.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-  };
+  // setElementValue imported from utils/dom
 
   const getVisibleMessageField = (): HTMLElement | null => {
     const contexts = getInteractionContexts();
@@ -941,52 +860,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     return undefined;
   };
 
-  const parseQuantity = (value?: string | null): { raw?: string; quantity?: number } => {
-    if (!value) return {};
-    const raw = sanitize(value);
-    const digits = raw.replace(/[^0-9.]/g, '');
-    const quantity = digits ? Number(digits) : undefined;
-    return {
-      raw,
-      quantity: typeof quantity === 'number' && Number.isFinite(quantity) ? quantity : undefined,
-    };
-  };
-
-  const parseRupeeRange = (value?: string | null): { raw?: string; min?: number; max?: number } => {
-    if (!value) return {};
-    const raw = sanitize(value);
-
-    // Identify scale keywords (lakh/crore) to adjust numeric values
-    const lower = raw.toLowerCase();
-    let scale = 1;
-    if (/\b(crore|cr)\b/.test(lower)) {
-      scale = 10000000;
-    } else if (/\b(lakh|lac|lacs|l)\b/.test(lower)) {
-      scale = 100000;
-    }
-
-    // Strip common currency prefixes so they don't interfere with parsing
-    const withoutCurrency = raw.replace(/(?:rs\.?|inr|₹)/gi, ' ');
-
-    // Extract numeric tokens (supports comma-separated thousands and decimals)
-    const matches = withoutCurrency.match(/\d[\d,]*(?:\.\d+)?/g);
-    if (!matches || matches.length === 0) {
-      return { raw };
-    }
-
-    const numbers = matches
-      .map((token) => token.replace(/,/g, ''))
-      .map((token) => Number(token) * scale)
-      .filter((num) => Number.isFinite(num));
-
-    if (numbers.length === 0) {
-      return { raw };
-    }
-
-    const min = numbers[0];
-    const max = numbers.length > 1 ? numbers[numbers.length - 1] : numbers[0];
-    return { raw, min, max };
-  };
+  // parseQuantity and parseRupeeRange imported from utils/text
 
   const describeContext = (ctx: Document | ShadowRoot, index: number): string => {
     if (ctx === document) return 'document';
@@ -1053,8 +927,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     return cards;
   };
 
-  const delay = (ms: number): Promise<void> =>
-    new Promise((resolve) => setTimeout(resolve, ms));
+  // delay imported from utils/time
 
   const withContactLock = async <T>(task: () => Promise<T>): Promise<T> => {
     while (contactInFlight) {
@@ -1513,24 +1386,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     return leads;
   };
 
-  const findElementByText = (root: ParentNode, selector: string, text: string): HTMLElement | null => {
-    const target = text.trim().toLowerCase();
-    return Array.from(root.querySelectorAll<HTMLElement>(selector)).find((el) => el.textContent?.trim().toLowerCase() === target) || null;
-  };
-
-  const waitForElement = async (
-    factory: () => HTMLElement | null,
-    timeoutMs = 8000,
-    intervalMs = 150
-  ): Promise<HTMLElement | null> => {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-      const el = factory();
-      if (el) return el;
-      await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    }
-    return null;
-  };
+  // findElementByText and waitForElement imported from utils/dom
 
   const performContactFlow = async (cardIndex: number, lead?: Lead): Promise<{ success: boolean; error?: string }> => {
     const shouldAbort = () => isStopped || !isAutoContactEnabled;
@@ -1626,12 +1482,18 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     }
 
     
-    // Ensure button is visible and in viewport before clicking
-    contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    await delay(500);
-    
-    await clickWithFallback(contactButton, 'Contact Buyer');
+    // COMMENTED OUT: Contact Buyer Now button click flow
+    // // Ensure button is visible and in viewport before clicking
+    // contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // await delay(500);
+    // 
+    // await clickWithFallback(contactButton, 'Contact Buyer');
 
+    // Return early since contact button click is disabled
+    return { success: false, error: 'Contact Buyer Now button click is currently disabled.' };
+
+    // COMMENTED OUT: All code below is disabled since contact button click is commented out
+    /* 
     // Wait for contact form/modal to appear after clicking Contact Buyer Now
     await delay(1000); // Additional delay for form to load
 
@@ -1727,76 +1589,81 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
       }
     }
 
-    // Ensure button is in view before clicking
-    replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    await delay(500); // Wait for scroll
+    // COMMENTED OUT: Send Reply button click flow
+    // // Ensure button is in view before clicking
+    // replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    // await delay(500); // Wait for scroll
 
-    if (shouldAbort()) {
-      return { success: false, error: 'Auto-contact disabled.' };
-    }
+    // if (shouldAbort()) {
+    //   return { success: false, error: 'Auto-contact disabled.' };
+    // }
 
-    await clickWithFallback(replyButton, 'Send Reply');
+    // await clickWithFallback(replyButton, 'Send Reply');
 
-    // Give the site a moment to register the submission
-    await delay(1200);
+    // // Give the site a moment to register the submission
+    // await delay(1200);
 
-    let sendConfirmed = await waitForSendReplyConfirmation(6000);
+    // let sendConfirmed = await waitForSendReplyConfirmation(6000);
 
-    if (shouldAbort()) {
-      return { success: false, error: 'Auto-contact disabled.' };
-    }
+    // if (shouldAbort()) {
+    //   return { success: false, error: 'Auto-contact disabled.' };
+    // }
 
-    if (!sendConfirmed) {
-      // Check if button is still visible - if not, it might have been clicked successfully
-      const buttonStillVisible = isSendReplyButtonVisible();
-      const messageFieldStillVisible = !!getVisibleMessageField();
-      
-      // If both button and message field are gone, the form might have been submitted
-      if (!buttonStillVisible && !messageFieldStillVisible) {
-        sendConfirmed = true;
-      } else {
-        
-        // Additional check: see if success indicators are present (they might have appeared quickly)
-        await delay(1000); // Wait a bit more for potential success indicators
-        sendConfirmed = await waitForSendReplyConfirmation(2000);
-        
-        if (!sendConfirmed && buttonStillVisible) {
-          const retryButton =
-            (replyButton.isConnected && isElementVisible(replyButton)) ?
-              replyButton :
-              await waitForElement(() => {
-                const candidate = findSendReplyButton();
-                return isElementVisible(candidate) ? candidate : null;
-              }, 2000);
+    // if (!sendConfirmed) {
+    //   // Check if button is still visible - if not, it might have been clicked successfully
+    //   const buttonStillVisible = isSendReplyButtonVisible();
+    //   const messageFieldStillVisible = !!getVisibleMessageField();
+    //   
+    //   // If both button and message field are gone, the form might have been submitted
+    //   if (!buttonStillVisible && !messageFieldStillVisible) {
+    //     sendConfirmed = true;
+    //   } else {
+    //     
+    //     // Additional check: see if success indicators are present (they might have appeared quickly)
+    //     await delay(1000); // Wait a bit more for potential success indicators
+    //     sendConfirmed = await waitForSendReplyConfirmation(2000);
+    //     
+    //     if (!sendConfirmed && buttonStillVisible) {
+    //       const retryButton =
+    //         (replyButton.isConnected && isElementVisible(replyButton)) ?
+    //           replyButton :
+    //           await waitForElement(() => {
+    //             const candidate = findSendReplyButton();
+    //             return isElementVisible(candidate) ? candidate : null;
+    //           }, 2000);
 
-          if (retryButton && isSendReplyButtonVisible() && getVisibleMessageField()) {
-            if (shouldAbort()) {
-              return { success: false, error: 'Auto-contact disabled.' };
-            }
+    //       if (retryButton && isSendReplyButtonVisible() && getVisibleMessageField()) {
+    //         if (shouldAbort()) {
+    //           return { success: false, error: 'Auto-contact disabled.' };
+    //         }
 
-            await clickWithFallback(retryButton, 'Send Reply Retry');
-            await delay(1500);
-            sendConfirmed = await waitForSendReplyConfirmation(6000);
-          } else {
-            // If button disappeared, assume it was sent
-            if (!isSendReplyButtonVisible() && !getVisibleMessageField()) {
-              sendConfirmed = true;
-            }
-          }
-        }
-      }
-    }
+    //         await clickWithFallback(retryButton, 'Send Reply Retry');
+    //         await delay(1500);
+    //         sendConfirmed = await waitForSendReplyConfirmation(6000);
+    //       } else {
+    //         // If button disappeared, assume it was sent
+    //         if (!isSendReplyButtonVisible() && !getVisibleMessageField()) {
+    //           sendConfirmed = true;
+    //         }
+    //       }
+    //     }
+    //   }
+    // }
 
-    if (shouldAbort()) {
-      return { success: false, error: 'Auto-contact disabled.' };
-    }
+    // if (shouldAbort()) {
+    //   return { success: false, error: 'Auto-contact disabled.' };
+    // }
 
-    if (!sendConfirmed) {
-      const messageContent = getMessageFieldContent();
-      const validationError = getSendReplyError();
-      return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
-    }
+    // if (!sendConfirmed) {
+    //   const messageContent = getMessageFieldContent();
+    //   const validationError = getSendReplyError();
+    //   return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
+    // }
 
+    // Return early since we're not actually clicking the buttons
+    return { success: false, error: 'Contact and Send Reply button clicks are currently disabled.' };
+
+    // COMMENTED OUT: Code below would execute after successful send reply
     const leadDetails = lead || (card ? extractLead(card, cardIndex) : undefined);
     if (leadDetails && leadDetails.leadId) {
       contactedLeadHistory.set(leadDetails.leadId, Date.now());
@@ -1804,75 +1671,15 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     }
 
     return { success: true };
+    */
   };
 
   // Removed duplicate startScrapeLoop - defined later in the file
 
-  // Storage keys for filter configuration
-  const FILTER_KEYWORDS_KEY = 'indiamart_filter_keywords';
-  const FILTER_CATEGORIES_KEY = 'indiamart_filter_categories';
-  const FILTER_QUANTITY_KEY = 'indiamart_filter_quantity';
-  const FILTER_ORDER_VALUE_KEY = 'indiamart_filter_order_value';
-  const DAILY_CONTACT_STATS_KEY = 'indiamart_daily_contact_stats';
-  const CONTACT_HISTORY_WINDOW_DAYS = 10;
-
-  // Default filter values (used as fallback)
-  const DEFAULT_ENQUIRY_KEYWORDS = [
-    'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'school jackets', 'nurse uniform',
-    'chef coats', 'coat', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
-    'kids school uniform', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
-    'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety',
-    'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms'
-  ];
-  // const DEFAULT_ENQUIRY_KEYWORDS = [
-  //   'uniform', 'uniform fabric' 
-  // ];
-  // const DEFAULT_ALLOWED_CATEGORIES = [
-  //   'uniform'
-  // ];
-  const DEFAULT_ALLOWED_CATEGORIES = [
-    'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
-    'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
-    'safety suits', 'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
-    'school jackets'
-  ];
-
+  // Filter constants imported from constants/filters
   // Mutable filter arrays (loaded from storage on init)
   let enquiryKeywords: string[] = [...DEFAULT_ENQUIRY_KEYWORDS];
   let allowedCategories: string[] = [...DEFAULT_ALLOWED_CATEGORIES];
-
-  // List of all Indian states for location validation
-  const INDIAN_STATES = [
-    'Andhra Pradesh',
-    'Arunachal Pradesh',
-    'Assam',
-    'Bihar',
-    'Chhattisgarh',
-    'Goa',
-    'Gujarat',
-    'Haryana',
-    'Himachal Pradesh',
-    'Jharkhand',
-    'Karnataka',
-    'Kerala',
-    'Delhi',
-    'Madhya Pradesh',
-    'Maharashtra',
-    'Manipur',
-    'Meghalaya',
-    'Mizoram',
-    'Nagaland',
-    'Odisha',
-    'Punjab',
-    'Rajasthan',
-    'Sikkim',
-    'Tamil Nadu',
-    'Telangana',
-    'Tripura',
-    'Uttar Pradesh',
-    'Uttarakhand',
-    'West Bengal'
-  ];
   let quantityThreshold = { min: 20, unit: 'piece' };
   let orderValueMin = 5000;
   interface DailyContactStats {
@@ -1884,26 +1691,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
   let dailyContactStats: DailyContactStats | null = null;
   let contactedLeadHistory: Map<string, number> = new Map();
 
-  // Validation helpers
-  const validateKeyword = (keyword: string): boolean => {
-    const trimmed = keyword.trim();
-    return trimmed.length > 0 && trimmed.length <= 100;
-  };
-
-  const sanitizeKeyword = (keyword: string): string => {
-    return keyword.trim().toLowerCase();
-  };
-
-  const getTodayIdentifier = () => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    return {
-      dateKey: `${year}-${month}-${day}`,
-      dayOfWeek: now.getDay(),
-    };
-  };
+  // Validation and date utilities imported from utils/
 
   const determineDailyLimit = (dayOfWeek: number): number => {
     // Sunday (0) => 6-8, Monday-Saturday => 14-18
@@ -1986,7 +1774,7 @@ import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
     chrome.runtime?.sendMessage?.({ type: 'DAILY_CONTACT_LIMIT_REACHED', payload: dailyContactStats });
   };
 
-  const CONTACT_HISTORY_RETENTION_MS = CONTACT_HISTORY_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  // CONTACT_HISTORY_RETENTION_MS imported from constants/timing
 
   const purgeStaleContactHistory = () => {
     const cutoff = Date.now() - CONTACT_HISTORY_RETENTION_MS;

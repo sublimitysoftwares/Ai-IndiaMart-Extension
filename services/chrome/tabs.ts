@@ -78,3 +78,19 @@ export const removeTabUpdateListener = (
   }
   chrome.tabs.onUpdated.removeListener(listener);
 };
+
+export const sendMessageToTab = (tabId: number, message: any): Promise<any> => {
+  return new Promise((resolve) => {
+    if (typeof chrome === 'undefined' || !chrome.tabs?.sendMessage) {
+      resolve(undefined);
+      return;
+    }
+    try {
+      chrome.tabs.sendMessage(tabId, message, (response) => {
+        resolve(response);
+      });
+    } catch (error) {
+      resolve(undefined);
+    }
+  });
+};

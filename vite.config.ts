@@ -18,6 +18,7 @@ export default defineConfig({
         background: resolve(__dirname, 'background/background.ts'),
         content: resolve(__dirname, 'content.ts'),
       },
+      preserveEntrySignatures: false,
       output: {
         entryFileNames: (chunkInfo) => {
             // Keep background and content script names static for the manifest
@@ -27,10 +28,25 @@ export default defineConfig({
             // Use default hashed names for other assets
             return 'assets/[name]-[hash].js';
         },
+        // Use ES modules (service workers support ES modules in Manifest V3)
+        format: 'es',
+        // Ensure chunks are properly named for extension compatibility
+        chunkFileNames: 'assets/[name]-[hash].js',
+        // Force all shared dependencies into separate chunks
+        manualChunks: (id) => {
+          // Don't split node_modules - bundle everything together for extension scripts
+          if (id.includes('node_modules')) {
+            return 'vendor';
+          }
+        },
       }
     },
     // Set to false to disable minification for easier debugging and to prevent variable name collisions
-    minify: false, 
+    minify: false,
+    // Ensure common chunks are shared properly
+    commonjsOptions: {
+      include: [/node_modules/],
+    },
   },
   // This ensures files in the public directory are copied to the dist folder
   publicDir: 'public',

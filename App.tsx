@@ -2,131 +2,77 @@
 /// <reference types="chrome" />
 
 import React, { useState, useEffect } from 'react';
-import type { Lead } from './types';
+import type { Lead, FilterCriteria, AutoContactStats, DailyContactStatsSummary, CycleSummary } from './types';
+import { AppState } from './types';
+import { useAgentState } from './hooks/useAgentState';
+import { useFilterConfig } from './hooks/useFilterConfig';
+import { useLeads } from './hooks/useLeads';
 import { LeadCard } from './components/LeadCard';
-
-enum AppState {
-  Idle,
-  Loading,
-  LeadsScraped,
-  Error,
-  AutoContact,
-}
-
-interface AutoContactStats {
-  totalContacted: number;
-  totalFiltered: number;
-  sessionStartTime: number;
-}
-
-interface FilterCriteria {
-  keywords?: string[];
-  foreignIndicators?: string[];
-  quantity?: { min?: number; unit?: string };
-  orderValueMin?: number;
-  categories?: string[];
-}
-
-interface DailyContactStatsSummary {
-  date: string;
-  count: number;
-  limit: number;
-  dayOfWeek: number;
-}
-
-interface CycleSummary {
-  timestamp: string;
-  totalLeads: number;
-  qualifiedLeads: number;
-  selectedLeads: Array<{ id?: string; company?: string; orderValue?: string }>;
-  skippedLeads?: number;
-  buyLeadBalance?: number;
-  actions?: string[];
-  errors?: string[];
-  dailyStats?: DailyContactStatsSummary;
-  backoffActive?: boolean;
-}
+import { AgentControls } from './components/AgentControls/AgentControls';
+import { SettingsPanel } from './components/Settings/SettingsPanel';
+import { LeadsList } from './components/LeadsList/LeadsList';
+import { FilterDetails } from './components/LeadsList/FilterDetails';
+import { LoadingSpinner } from './components/LoadingStates/LoadingSpinner';
 
 const App: React.FC = () => {
-  const [appState, setAppState] = useState<AppState>(AppState.Idle);
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [filteredLeads, setFilteredLeads] = useState<Lead[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [sortBy, setSortBy] = useState<'time' | 'company'>('time');
-  const [autoContactEnabled, setAutoContactEnabled] = useState(false);
-  const [agentStopped, setAgentStopped] = useState(false);
-  const [autoContactStats, setAutoContactStats] = useState<AutoContactStats>({
-    totalContacted: 0,
-    totalFiltered: 0,
-    sessionStartTime: Date.now()
-  });
-  const [showFilterDetails, setShowFilterDetails] = useState(false);
-  const [agentInitialized, setAgentInitialized] = useState(false);
-  const agentStoppedRef = React.useRef(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showFilterDetails, setShowFilterDetails] = useState(false);
   const [filterCriteria, setFilterCriteria] = useState<FilterCriteria | null>(null);
-  const [cycleSummary, setCycleSummary] = useState<CycleSummary | null>(null);
-  const [dailyStats, setDailyStats] = useState<DailyContactStatsSummary | null>(null);
-  const [backoffNotice, setBackoffNotice] = useState<string | null>(null);
-  const backoffTimerRef = React.useRef<number | null>(null);
-  
-  // Settings state
-  const [keywords, setKeywords] = useState<string[]>([]);
-  const [categories, setCategories] = useState<string[]>([]);
-  const [newKeyword, setNewKeyword] = useState('');
-  const [newCategory, setNewCategory] = useState('');
-  const [quantityMin, setQuantityMin] = useState<string>('100');
-  const [quantityUnit, setQuantityUnit] = useState<string>('piece');
-  const [orderValue, setOrderValue] = useState<string>('50000');
-  const [settingsMessage, setSettingsMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const sortedLeads = React.useMemo(() => {
-    const arr = [...leads];
-    if (arr.length === 0) return arr;
-    switch (sortBy) {
-      case 'time': {
-        const toTime = (t?: string) => {
-          if (!t) return 0;
-          const d = new Date(t);
-          return isNaN(d.getTime()) ? 0 : d.getTime();
-        };
-        return arr.sort((a, b) => toTime(b.timestamp) - toTime(a.timestamp));
-      }
-      case 'company':
-        return arr.sort((a, b) => (a.companyName || '').localeCompare(b.companyName || ''));
-      default:
-        return arr;
-    }
-  }, [leads, sortBy]);
+  // Use custom hooks for state management
+  const {
+    appState,
+    setAppState,
+    autoContactEnabled,
+    setAutoContactEnabled,
+    agentStopped,
+    setAgentStopped,
+    agentInitialized,
+    setAgentInitialized,
+    error,
+    setError,
+    autoContactStats,
+    setAutoContactStats,
+    dailyStats,
+    setDailyStats,
+    cycleSummary,
+    setCycleSummary,
+    backoffNotice,
+    setBackoffNotice,
+    agentStoppedRef,
+    backoffTimerRef,
+    handleStartAgent,
+    handleToggleAutoContact,
+    handleStopAgent,
+  } = useAgentState();
 
-  useEffect(() => {
-    // Ensure this code runs only within a Chrome extension context
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-      // Listen for storage changes to reload settings when they're updated
-      if (chrome.storage && chrome.storage.onChanged) {
-        const storageListener = (changes: { [key: string]: chrome.storage.StorageChange }, areaName: string) => {
-          if (areaName === 'local') {
-            const filterKeys = [
-              'indiamart_filter_keywords',
-              'indiamart_filter_categories',
-              'indiamart_filter_quantity',
-              'indiamart_filter_order_value'
-            ];
-            const hasFilterChange = filterKeys.some(key => changes[key]);
-            if (hasFilterChange && showSettings) {
-              loadFilterConfig();
-            }
-          }
-        };
-        chrome.storage.onChanged.addListener(storageListener);
-        
-        // Cleanup listener on unmount
-        return () => {
-          chrome.storage?.onChanged.removeListener(storageListener);
-        };
-      }
-    }
-  }, [showSettings]);
+  const { leads, setLeads, filteredLeads, setFilteredLeads, sortBy, setSortBy, sortedLeads } = useLeads();
+
+  const {
+    keywords,
+    categories,
+    newKeyword,
+    setNewKeyword,
+    newCategory,
+    setNewCategory,
+    quantityMin,
+    setQuantityMin,
+    quantityUnit,
+    setQuantityUnit,
+    orderValue,
+    setOrderValue,
+    settingsMessage,
+    handleAddKeyword,
+    handleRemoveKeyword,
+    handleAddCategory,
+    handleRemoveCategory,
+    handleUpdateQuantity,
+    handleUpdateOrderValue,
+    handleExportConfig,
+    handleImportConfig,
+  } = useFilterConfig(filterCriteria, showSettings);
+
+  // Storage change listener is handled by useFilterConfig hook
   
   useEffect(() => {
     // Ensure this code runs only within a Chrome extension context
@@ -433,529 +379,7 @@ const App: React.FC = () => {
     }
   }, []);
 
-  const handleStartAgent = () => {
-     // Ensure this code runs only within a Chrome extension context
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-        setError(null);
-        if (!agentInitialized) {
-          setAppState(AppState.Loading);
-        }
-        // Optimistic UI updates - set immediately before response
-        setAgentStopped(false);
-        agentStoppedRef.current = false;
-        setAutoContactEnabled(true);
-        setAppState(AppState.Loading);
-        
-        chrome.runtime.sendMessage({ type: 'START_AGENT' }, (response) => {
-          if (chrome.runtime.lastError) {
-            setError('Failed to start agent. Please try again.');
-            setAppState(AppState.Error);
-            // Revert optimistic state on error
-            setAgentStopped(true);
-            agentStoppedRef.current = true;
-            setAutoContactEnabled(false);
-            return;
-          }
-
-          if (response && response.success) {
-            // Keep optimistic state, will be confirmed by GET_AGENT_STATUS
-            
-            chrome.runtime.sendMessage({ type: 'ENABLE_AUTO_CONTACT' });
-
-            if (response.leadsPayload) {
-              setLeads(response.leadsPayload.allLeads || []);
-              setFilteredLeads(response.leadsPayload.filteredLeads || []);
-              setAgentInitialized(true);
-              setAppState(AppState.AutoContact);
-            } else {
-              // No leads payload yet - query status immediately and poll for updates
-              setAppState(AppState.Loading);
-              
-              // Immediate status query
-              const queryStatus = (attempt: number = 1) => {
-                chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (statusResponse) => {
-                  if (statusResponse && statusResponse.success) {
-                    if (statusResponse.agentActive && statusResponse.leadsPayload) {
-                      // Agent is active with data - update UI
-                      const allLeads = statusResponse.leadsPayload.allLeads || [];
-                      const filteredLeadsData = statusResponse.leadsPayload.filteredLeads || [];
-                      
-                      setLeads(allLeads);
-                      setFilteredLeads(filteredLeadsData);
-                      setAutoContactEnabled(Boolean(statusResponse.autoContactEnabled));
-                      setAgentInitialized(true);
-                      setAppState(statusResponse.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
-                      
-                      if (statusResponse.leadsPayload.filters) {
-                        setFilterCriteria(statusResponse.leadsPayload.filters);
-                      }
-                      
-                      if (statusResponse.statistics) {
-                        setAutoContactStats(prev => ({
-                          ...prev,
-                          totalFiltered: statusResponse.statistics.totalFiltered || prev.totalFiltered,
-                          totalContacted: statusResponse.statistics.totalContacted || prev.totalContacted,
-                        }));
-                      }
-                    } else if (attempt < 3) {
-                      // Poll up to 3 times with increasing delays
-                      setTimeout(() => queryStatus(attempt + 1), attempt === 1 ? 500 : 1000);
-                    } else {
-                      // After 3 attempts, show loading state (will update when FILTERED_LEADS_DATA arrives)
-                      setAppState(AppState.Loading);
-                    }
-                  }
-                });
-              };
-              
-              // Start polling immediately
-              queryStatus(1);
-            }
-          }
-        });
-    } else {
-        setError("Cannot communicate with the extension background script. Are you running this as an extension?");
-        setAppState(AppState.Error);
-    }
-  };
-  
-  const handleToggleAutoContact = () => {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      const newState = !autoContactEnabled;
-      setAutoContactEnabled(newState);
-      setAgentStopped(false);
-      agentStoppedRef.current = false;
-      
-      if (newState) {
-        setAppState(AppState.AutoContact);
-        chrome.runtime.sendMessage({ type: 'ENABLE_AUTO_CONTACT' }, (response) => {
-          if (chrome.runtime.lastError) {
-            // Revert UI state on error
-            setAutoContactEnabled(false);
-            setAppState(AppState.LeadsScraped);
-          } else if (response?.success) {
-            // Reset stats when enabling
-            setAutoContactStats({
-              totalContacted: 0,
-              totalFiltered: 0,
-              sessionStartTime: Date.now()
-            });
-          }
-        });
-      } else {
-        setAppState(AppState.LeadsScraped);
-        chrome.runtime.sendMessage({ type: 'DISABLE_AUTO_CONTACT' }, (response) => {
-          if (chrome.runtime.lastError) {
-            // Revert UI state on error
-            setAutoContactEnabled(true);
-            setAppState(AppState.AutoContact);
-          } else {
-            // Verify state is disabled by querying background
-            chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (statusResponse) => {
-              if (statusResponse?.success && statusResponse.autoContactEnabled !== false) {
-                setAutoContactEnabled(statusResponse.autoContactEnabled);
-                setAppState(statusResponse.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
-              }
-            });
-          }
-        });
-      }
-    }
-  };
-  
-  const handleStopAgent = () => {
-    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.sendMessage) {
-      setAgentStopped(true);
-      agentStoppedRef.current = true;
-      setAutoContactEnabled(false);
-      setLeads([]);
-      setFilteredLeads([]);
-      setAppState(AppState.Idle);
-
-      chrome.runtime.sendMessage({ type: 'DISABLE_AUTO_CONTACT' }, () => {
-        chrome.runtime.sendMessage({ type: 'STOP_AGENT' }, () => {
-        });
-      });
-    }
-  };
-
-  // Load filter config from storage
-  const loadFilterConfig = async () => {
-    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
-      return;
-    }
-
-    try {
-      const result = await chrome.storage.local.get([
-        'indiamart_filter_keywords', 
-        'indiamart_filter_categories',
-        'indiamart_filter_quantity',
-        'indiamart_filter_order_value'
-      ]);
-
-      // Default keywords and categories (same as content script defaults)
-      const DEFAULT_KEYWORDS = [
-        'uniform', 'uniform fabric', 'uniform blazers', 'uniform jackets', 'school jackets', 'nurse uniform',
-        'chef coats', 'coat', 'corporate uniform', 'staff uniform', 'ncc uniform', 'waiter uniform',
-        'kids school uniform', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
-        'worker uniform', 'security guard uniform', 'petrol pump uniform', 'safety suits',
-        'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms'
-      ];
-      const DEFAULT_CATEGORIES = [
-        'kids school uniform', 'kids school uniforms', 'school uniforms', 'school blazers', 'school blazer', 'school uniform fabric',
-        'worker uniform', 'uniform fabric', 'security guard uniform', 'petrol pump uniform',
-        'safety suits', 'boys school uniform', 'girls school uniform', 'surgical gown', 'hospital uniforms', 'corporate uniform', 'school college uniforms',
-        'school jackets'
-      ];
-      // const DEFAULT_KEYWORDS = [
-      //   'uniform', 'uniform fabric' 
-      // ];
-      // const DEFAULT_CATEGORIES = [
-      //   'uniform' 
-      // ];
-
-      // Load keywords - prioritize storage, fallback to filterCriteria, then defaults
-      if (Array.isArray(result.indiamart_filter_keywords) && result.indiamart_filter_keywords.length > 0) {
-        setKeywords(result.indiamart_filter_keywords);
-      } else if (filterCriteria?.keywords && filterCriteria.keywords.length > 0) {
-        setKeywords(filterCriteria.keywords);
-      } else {
-        // Use defaults and save them to storage
-        setKeywords(DEFAULT_KEYWORDS);
-        chrome.storage.local.set({ 'indiamart_filter_keywords': DEFAULT_KEYWORDS });
-      }
-
-      // Load categories - prioritize storage, fallback to filterCriteria, then defaults
-      if (Array.isArray(result.indiamart_filter_categories) && result.indiamart_filter_categories.length > 0) {
-        setCategories(result.indiamart_filter_categories);
-      } else if (filterCriteria?.categories && filterCriteria.categories.length > 0) {
-        setCategories(filterCriteria.categories);
-      } else {
-        // Use defaults and save them to storage
-        setCategories(DEFAULT_CATEGORIES);
-        chrome.storage.local.set({ 'indiamart_filter_categories': DEFAULT_CATEGORIES });
-      }
-
-      // Load quantity threshold - prioritize storage, fallback to filterCriteria, then defaults
-      if (result.indiamart_filter_quantity && typeof result.indiamart_filter_quantity === 'object' && typeof result.indiamart_filter_quantity.min === 'number') {
-        const qty = result.indiamart_filter_quantity;
-        setQuantityMin(String(qty.min || 20));
-        setQuantityUnit(qty.unit || 'piece');
-      } else if (filterCriteria?.quantity && typeof filterCriteria.quantity.min === 'number') {
-        setQuantityMin(String(filterCriteria.quantity.min || 20));
-        setQuantityUnit(filterCriteria.quantity.unit || 'piece');
-      } else {
-        // Use defaults
-        setQuantityMin('20');
-        setQuantityUnit('piece');
-      }
-
-      // Load order value minimum - prioritize storage, fallback to filterCriteria, then defaults
-      if (typeof result.indiamart_filter_order_value === 'number' && result.indiamart_filter_order_value > 0) {
-        setOrderValue(String(result.indiamart_filter_order_value));
-      } else if (typeof filterCriteria?.orderValueMin === 'number' && filterCriteria.orderValueMin > 0) {
-        setOrderValue(String(filterCriteria.orderValueMin));
-      } else {
-        // Use defaults
-        setOrderValue('5000');
-      }
-    } catch (error) {
-      // On error, try to use filterCriteria as fallback
-      if (filterCriteria) {
-        if (filterCriteria.keywords) setKeywords(filterCriteria.keywords);
-        if (filterCriteria.categories) setCategories(filterCriteria.categories);
-        if (filterCriteria.quantity) {
-          setQuantityMin(String(filterCriteria.quantity.min || 20));
-          setQuantityUnit(filterCriteria.quantity.unit || 'piece');
-        }
-        if (typeof filterCriteria.orderValueMin === 'number') {
-          setOrderValue(String(filterCriteria.orderValueMin));
-        }
-      }
-    }
-  };
-
-  // Save filter config to storage and notify content script
-  const saveFilterConfig = async (
-    newKeywords?: string[], 
-    newCategories?: string[],
-    newQuantity?: { min: number; unit: string },
-    newOrderValue?: number
-  ) => {
-    if (typeof chrome === 'undefined' || !chrome.storage?.local) return false;
-
-    try {
-      const toSave: Record<string, any> = {};
-
-      if (newKeywords !== undefined) {
-        const validated = newKeywords
-          .filter(k => k.trim().length > 0 && k.trim().length <= 100)
-          .map(k => k.trim())
-          .slice(0, 500);
-        toSave['indiamart_filter_keywords'] = validated;
-        setKeywords(validated);
-      }
-
-      if (newCategories !== undefined) {
-        const validated = newCategories
-          .filter(c => c.trim().length > 0 && c.trim().length <= 100)
-          .map(c => c.trim())
-          .slice(0, 500);
-        toSave['indiamart_filter_categories'] = validated;
-        setCategories(validated);
-      }
-
-        // Save quantity threshold
-        if (newQuantity !== undefined) {
-          const validated = {
-            min: Math.max(1, Math.min(newQuantity.min, 1000000)),
-            unit: (newQuantity.unit || 'piece').trim().toLowerCase()
-          };
-          toSave['indiamart_filter_quantity'] = validated;
-          setQuantityMin(String(validated.min));
-          setQuantityUnit(validated.unit);
-        }
-
-        // Save order value minimum
-        if (newOrderValue !== undefined) {
-          const validated = Math.max(0, Math.min(newOrderValue, 100000000));
-          toSave['indiamart_filter_order_value'] = validated;
-          setOrderValue(String(validated));
-        }
-
-      if (Object.keys(toSave).length > 0) {
-        await chrome.storage.local.set(toSave);
-        
-        // Small delay to ensure storage is committed before notifying content script
-        await new Promise(resolve => setTimeout(resolve, 100));
-        
-        // Notify content script to reload
-        chrome.tabs.query({ url: '*://seller.indiamart.com/*' }, (tabs) => {
-          if (tabs.length === 0) {
-            return;
-          }
-          
-          tabs.forEach(tab => {
-            if (tab.id) {
-              chrome.tabs.sendMessage(tab.id, { type: 'FILTER_KEYWORDS_UPDATED' });
-            }
-          });
-        });
-
-        setSettingsMessage({ type: 'success', text: 'Filter settings saved successfully!' });
-        setTimeout(() => setSettingsMessage(null), 3000);
-        return true;
-      }
-
-      return false;
-    } catch (error) {
-      setSettingsMessage({ type: 'error', text: 'Failed to save filter settings.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-      return false;
-    }
-  };
-
-  // Add keyword
-  const handleAddKeyword = () => {
-    if (!newKeyword.trim() || newKeyword.trim().length > 100) {
-      setSettingsMessage({ type: 'error', text: 'Keyword must be between 1-100 characters.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-      return;
-    }
-
-    const trimmed = newKeyword.trim().toLowerCase();
-    if (keywords.includes(trimmed)) {
-      setSettingsMessage({ type: 'error', text: 'Keyword already exists.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-      return;
-    }
-
-    const updated = [...keywords, trimmed];
-    saveFilterConfig(updated, undefined);
-    setNewKeyword('');
-  };
-
-  // Remove keyword
-  const handleRemoveKeyword = (keyword: string) => {
-    const updated = keywords.filter(k => k !== keyword);
-    saveFilterConfig(updated, undefined);
-  };
-
-  // Add category
-  const handleAddCategory = () => {
-    if (!newCategory.trim() || newCategory.trim().length > 100) {
-      setSettingsMessage({ type: 'error', text: 'Category must be between 1-100 characters.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-      return;
-    }
-
-    const trimmed = newCategory.trim().toLowerCase();
-    if (categories.includes(trimmed)) {
-      setSettingsMessage({ type: 'error', text: 'Category already exists.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-      return;
-    }
-
-    const updated = [...categories, trimmed];
-    saveFilterConfig(undefined, updated);
-    setNewCategory('');
-  };
-
-  // Remove category
-  const handleRemoveCategory = (category: string) => {
-    const updated = categories.filter(c => c !== category);
-    saveFilterConfig(undefined, updated);
-  };
-
-  // Update quantity
-  const handleUpdateQuantity = async () => {
-    const numValue = parseInt(quantityMin.trim(), 10);
-    if (isNaN(numValue) || numValue < 1 || numValue > 1000000) {
-      setSettingsMessage({ type: 'error', text: 'Quantity must be between 1 and 1,000,000.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-      // Reset to last valid value
-      setQuantityMin('100');
-      return;
-    }
-    const unitTrimmed = quantityUnit.trim().toLowerCase() || 'piece';
-    try {
-      const success = await saveFilterConfig(undefined, undefined, { min: numValue, unit: unitTrimmed }, undefined);
-      if (!success) {
-        setSettingsMessage({ type: 'error', text: 'Failed to save quantity threshold.' });
-        setTimeout(() => setSettingsMessage(null), 3000);
-      }
-    } catch (error) {
-      setSettingsMessage({ type: 'error', text: 'Error saving quantity threshold.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-    }
-  };
-
-  // Update order value
-  const handleUpdateOrderValue = async () => {
-    const numValue = parseInt(orderValue.trim(), 10);
-    if (isNaN(numValue) || numValue < 0 || numValue > 100000000) {
-      setSettingsMessage({ type: 'error', text: 'Order value must be between ₹0 and ₹100,000,000.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-      // Reset to last valid value
-      setOrderValue('50000');
-      return;
-    }
-    try {
-      const success = await saveFilterConfig(undefined, undefined, undefined, numValue);
-      if (!success) {
-        setSettingsMessage({ type: 'error', text: 'Failed to save order value threshold.' });
-        setTimeout(() => setSettingsMessage(null), 3000);
-      }
-    } catch (error) {
-      setSettingsMessage({ type: 'error', text: 'Error saving order value threshold.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-    }
-  };
-
-  // Export filter config as JSON
-  const handleExportConfig = () => {
-    const config = {
-      keywords: keywords,
-      categories: categories,
-      quantity: { min: parseInt(quantityMin) || 100, unit: quantityUnit },
-      orderValue: parseInt(orderValue) || 50000,
-      version: '1.0',
-      updated: new Date().toISOString()
-    };
-
-    const blob = new Blob([JSON.stringify(config, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `indiamart-filter-config-${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-
-    setSettingsMessage({ type: 'success', text: 'Configuration exported successfully!' });
-    setTimeout(() => setSettingsMessage(null), 3000);
-  };
-
-  // Import filter config from JSON file
-  const handleImportConfig = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-
-    try {
-      const text = await file.text();
-      const config = JSON.parse(text);
-
-      if (typeof config !== 'object' || config === null) {
-        throw new Error('Invalid file format');
-      }
-
-      const importedKeywords: string[] = Array.isArray(config.keywords)
-        ? config.keywords.filter((k: any) => typeof k === 'string' && k.trim().length > 0 && k.trim().length <= 100).slice(0, 500)
-        : [];
-      
-      const importedCategories: string[] = Array.isArray(config.categories)
-        ? config.categories.filter((c: any) => typeof c === 'string' && c.trim().length > 0 && c.trim().length <= 100).slice(0, 500)
-        : [];
-
-      const importedQuantity: { min: number; unit: string } | undefined = 
-        config.quantity && typeof config.quantity === 'object' && typeof config.quantity.min === 'number' && typeof config.quantity.unit === 'string'
-          ? { 
-              min: Math.max(1, Math.min(config.quantity.min, 1000000)), 
-              unit: config.quantity.unit.trim().toLowerCase() || 'piece' 
-            }
-          : undefined;
-
-      const importedOrderValue: number | undefined = 
-        typeof config.orderValue === 'number' && config.orderValue >= 0 && config.orderValue <= 100000000
-          ? Math.max(0, Math.min(config.orderValue, 100000000))
-          : undefined;
-
-      if (importedKeywords.length === 0 && importedCategories.length === 0 && importedQuantity === undefined && importedOrderValue === undefined) {
-        setSettingsMessage({ type: 'error', text: 'No valid keywords, categories, quantity, or order value found in file.' });
-        setTimeout(() => setSettingsMessage(null), 3000);
-        return;
-      }
-
-      await saveFilterConfig(
-        importedKeywords.length > 0 ? importedKeywords : keywords,
-        importedCategories.length > 0 ? importedCategories : categories,
-        importedQuantity,
-        importedOrderValue
-      );
-
-      setSettingsMessage({ type: 'success', text: 'Configuration imported successfully!' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-    } catch (error) {
-      setSettingsMessage({ type: 'error', text: 'Failed to import configuration. Please check file format.' });
-      setTimeout(() => setSettingsMessage(null), 3000);
-    }
-
-    // Reset file input
-    event.target.value = '';
-  };
-
-  // Load config when settings panel opens or when filterCriteria updates
-  useEffect(() => {
-    if (showSettings) {
-      // Load immediately when settings panel opens
-      loadFilterConfig();
-      
-      // Also retry loading after a short delay in case storage wasn't ready
-      const retryTimer = setTimeout(() => {
-        loadFilterConfig();
-      }, 500);
-      
-      return () => clearTimeout(retryTimer);
-    }
-  }, [showSettings]);
-  
-  // Also reload when filterCriteria changes (from content script)
-  useEffect(() => {
-    if (showSettings && filterCriteria) {
-      loadFilterConfig();
-    }
-  }, [filterCriteria]);
+  // Handler functions are provided by hooks (useAgentState and useFilterConfig)
 
   useEffect(() => {
     agentStoppedRef.current = agentStopped;
@@ -964,16 +388,7 @@ const App: React.FC = () => {
   const renderContent = () => {
     switch (appState) {
       case AppState.Loading:
-        return (
-          <div className="flex flex-col items-center justify-center text-center p-6">
-            <svg className="animate-spin h-8 w-8 text-indigo-400 mb-3" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            <p className="text-lg font-medium text-slate-300">Opening IndiaMART & Scouring for Leads...</p>
-            <p className="text-sm text-slate-400 mt-1">Please wait, the agent is at work.</p>
-          </div>
-        );
+        return <LoadingSpinner />;
       case AppState.LeadsScraped:
       case AppState.AutoContact:
         return (
@@ -981,200 +396,30 @@ const App: React.FC = () => {
             <div className="p-4 bg-slate-800/50 sticky top-0 backdrop-blur-sm z-10 border-b border-slate-700">
                <h2 className="text-lg font-bold text-white text-center">Found {leads.length} Leads</h2>
                
-               {/* Auto-Contact Toggle & Controls */}
-               <div className="mt-3 p-3 bg-slate-900 rounded-lg border border-slate-700">
-                 <div className="flex items-center justify-between mb-2">
-                   <span className="text-sm font-medium text-slate-300">Auto-Contact Mode</span>
-                   <div className="flex items-center gap-2">
-                     <button
-                       onClick={handleToggleAutoContact}
-                       disabled={agentStopped}
-                       className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${autoContactEnabled ? 'bg-green-500' : 'bg-slate-600'} ${agentStopped ? 'opacity-50' : ''}`}
-                     >
-                       <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${autoContactEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
-                     </button>
-                     {(autoContactEnabled || !agentStopped) && (
-                       <button
-                         onClick={handleStopAgent}
-                         className="px-3 py-1 text-xs bg-red-600 hover:bg-red-700 text-white rounded-md transition-colors"
-                       >
-                         Stop Agent
-                       </button>
-                     )}
-                   </div>
-                 </div>
-                 
-                 {autoContactEnabled && (
-                   <div className="space-y-2 text-xs">
-                     <div className="flex justify-between text-slate-400">
-                       <span>Filtered Leads:</span>
-                       <span className="text-green-400 font-bold">{filteredLeads.length}</span>
-                     </div>
-                     <div className="flex justify-between text-slate-400">
-                       <span>Auto-Contacted:</span>
-                       <span className="text-blue-400 font-bold">{autoContactStats.totalContacted} / {autoContactStats.totalFiltered}</span>
-                     </div>
-                     <div className="flex justify-between text-slate-400">
-                       <span>Session Duration:</span>
-                       <span className="text-slate-300">
-                         {Math.floor((Date.now() - autoContactStats.sessionStartTime) / 60000)} min
-                       </span>
-                     </div>
-                     <div className="flex justify-between text-slate-400">
-                       <span>Refresh Status:</span>
-                       <span className="text-yellow-400">
-                         {filteredLeads.length === 0 ? 'In 5 min (no leads)' : 
-                          autoContactStats.totalContacted >= autoContactStats.totalFiltered ? 'After all contacts' : 'Active'}
-                       </span>
-                     </div>
-                   </div>
-                 )}
-                 
-                 {agentStopped && (
-                   <div className="mt-2 p-2 bg-red-900/20 rounded text-xs text-red-400 text-center">
-                     Agent Stopped - Click "Start Agent" to resume
-                   </div>
-                 )}
-               {dailyStats && (
-                 <div className="mt-2 flex justify-between text-xs text-slate-400">
-                   <span>Daily Quota</span>
-                   <span className={dailyStats.count >= dailyStats.limit ? 'text-red-400 font-semibold' : 'text-green-400 font-semibold'}>
-                     {dailyStats.count} / {dailyStats.limit} ({dailyStats.date})
-                   </span>
-                 </div>
-               )}
-               {backoffNotice && (
-                 <div className="mt-2 p-2 bg-amber-900/30 border border-amber-500/40 rounded text-xs text-amber-100 flex items-center justify-between gap-2">
-                   <span>{backoffNotice}</span>
-                   <button
-                     onClick={() => {
-                       setBackoffNotice(null);
-                       if (backoffTimerRef.current) {
-                         window.clearTimeout(backoffTimerRef.current);
-                         backoffTimerRef.current = null;
-                       }
-                     }}
-                     className="text-amber-200 hover:text-white text-[10px] uppercase tracking-wide"
-                   >
-                     Dismiss
-                   </button>
-                 </div>
-               )}
-               </div>
+               <AgentControls
+                 autoContactEnabled={autoContactEnabled}
+                 agentStopped={agentStopped}
+                 filteredLeadsCount={filteredLeads.length}
+                 stats={autoContactStats}
+                 dailyStats={dailyStats}
+                 backoffNotice={backoffNotice}
+                 onToggleAutoContact={handleToggleAutoContact}
+                 onStopAgent={handleStopAgent}
+                 onDismissBackoff={() => {
+                   setBackoffNotice(null);
+                   if (backoffTimerRef.current) {
+                     window.clearTimeout(backoffTimerRef.current);
+                     backoffTimerRef.current = null;
+                   }
+                 }}
+               />
                
-               {/* Filter Criteria Display */}
-               <button
-                 onClick={() => setShowFilterDetails(!showFilterDetails)}
-                 className="w-full mt-2 text-xs text-slate-400 hover:text-slate-300 transition-colors"
-               >
-                 {showFilterDetails ? '▼' : '▶'} View Filter Criteria
-               </button>
-               
-               {showFilterDetails && (
-                 <div className="mt-2 p-2 bg-slate-900/50 rounded text-xs space-y-1 text-slate-400">
-                  {filterCriteria ? (
-                    <>
-                      {filterCriteria.keywords && filterCriteria.keywords.length > 0 && (
-                        <div>
-                          ✓ Keywords: {filterCriteria.keywords.slice(0, 6).join(', ')}
-                          {filterCriteria.keywords.length > 6 ? ', …' : ''}
-                        </div>
-                      )}
-              {cycleSummary && (
-                <div className="mt-3 p-3 bg-slate-900/40 border border-slate-800 rounded text-xs text-slate-300 space-y-1">
-                  <div className="text-slate-100 font-semibold">
-                    Last Cycle: {new Date(cycleSummary.timestamp).toLocaleTimeString()}
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Scanned</span>
-                    <span>{cycleSummary.totalLeads}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Qualified</span>
-                    <span>{cycleSummary.qualifiedLeads}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span>Selected</span>
-                    <span>{cycleSummary.selectedLeads?.length || 0}</span>
-                  </div>
-                  {typeof cycleSummary.skippedLeads === 'number' && (
-                    <div className="flex justify-between">
-                      <span>Skipped (human)</span>
-                      <span>{cycleSummary.skippedLeads}</span>
-                    </div>
-                  )}
-                  {typeof cycleSummary.buyLeadBalance === 'number' && (
-                    <div className="flex justify-between">
-                      <span>BuyLead Balance</span>
-                      <span>{cycleSummary.buyLeadBalance}</span>
-                    </div>
-                  )}
-                  {cycleSummary.selectedLeads && cycleSummary.selectedLeads.length > 0 && (
-                    <div>
-                      <div className="text-slate-400 mt-1">Selected Leads:</div>
-                      <ul className="list-disc list-inside text-slate-400">
-                        {cycleSummary.selectedLeads.map((lead, idx) => (
-                          <li key={`selected-${lead.id || idx}`}>
-                            {lead.company || lead.id} {lead.orderValue ? `(${lead.orderValue})` : ''}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {cycleSummary.actions && cycleSummary.actions.length > 0 && (
-                    <div>
-                      <div className="text-slate-400 mt-1">Actions:</div>
-                      <ul className="list-disc list-inside text-slate-400">
-                        {cycleSummary.actions.map((action: string, idx: number) => (
-                          <li key={`action-${idx}`}>{action}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {cycleSummary.errors && cycleSummary.errors.length > 0 && (
-                    <div>
-                      <div className="text-red-400 mt-1">Errors:</div>
-                      <ul className="list-disc list-inside text-red-400">
-                        {cycleSummary.errors.map((error: string, idx: number) => (
-                          <li key={`error-${idx}`}>{error}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
-                      {filterCriteria.foreignIndicators && filterCriteria.foreignIndicators.length > 0 && (
-                        <div>
-                          ✓ Location: Rejects foreign leads ({filterCriteria.foreignIndicators.map((item) =>
-                            item.toUpperCase()
-                          ).join(', ')})
-                        </div>
-                      )}
-                      {filterCriteria.quantity && typeof filterCriteria.quantity.min === 'number' && (
-                        <div>
-                          ✓ Quantity: ≥ {filterCriteria.quantity.min}{' '}
-                          {filterCriteria.quantity.unit ? `${filterCriteria.quantity.unit}s` : ''}
-                        </div>
-                      )}
-                      {typeof filterCriteria.orderValueMin === 'number' && (
-                        <div>✓ Order Value: ≥ ₹{filterCriteria.orderValueMin.toLocaleString()}</div>
-                      )}
-                      {filterCriteria.categories && filterCriteria.categories.length > 0 && (
-                        <div>✓ Categories: {filterCriteria.categories.join(', ')}</div>
-                      )}
-                      {!filterCriteria.keywords &&
-                        !filterCriteria.foreignIndicators &&
-                        !filterCriteria.quantity &&
-                        typeof filterCriteria.orderValueMin !== 'number' &&
-                        !filterCriteria.categories && (
-                          <div className="italic text-slate-500">No active filters.</div>
-                        )}
-                    </>
-                  ) : (
-                    <div className="italic text-slate-500">No filter information received yet.</div>
-                  )}
-                 </div>
-               )}
+               <FilterDetails
+                 filterCriteria={filterCriteria}
+                 cycleSummary={cycleSummary}
+                 showFilterDetails={showFilterDetails}
+                 onToggle={() => setShowFilterDetails(!showFilterDetails)}
+               />
                
                <div className="mt-3">
                  <label className="block text-sm text-slate-300 mb-1">Sort by</label>
@@ -1188,11 +433,11 @@ const App: React.FC = () => {
                  </select>
                </div>
             </div>
-            <div className="p-4 space-y-4">
-              {(autoContactEnabled ? filteredLeads : sortedLeads).map((lead, index) => (
-                <LeadCard key={index} lead={lead} />
-              ))}
-            </div>
+            <LeadsList
+              leads={sortedLeads}
+              filteredLeads={filteredLeads}
+              autoContactEnabled={autoContactEnabled}
+            />
           </div>
         );
       case AppState.Error:
@@ -1255,190 +500,30 @@ const App: React.FC = () => {
       </header>
       <main>
         {showSettings && (
-          <div className="border-b border-slate-800 p-4 bg-slate-900 max-h-[500px] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-slate-200">Filter Settings</h2>
-              <button
-                onClick={() => setShowSettings(false)}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded"
-              >
-                ✕
-              </button>
-            </div>
-
-            {settingsMessage && (
-              <div className={`mb-4 p-2 rounded text-xs ${
-                settingsMessage.type === 'success' 
-                  ? 'bg-green-900/30 text-green-400' 
-                  : 'bg-red-900/30 text-red-400'
-              }`}>
-                {settingsMessage.text}
-              </div>
-            )}
-
-            {/* Keywords Section */}
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-2">Keywords</h3>
-              <div className="flex gap-2 mb-2">
-                <input
-                  type="text"
-                  value={newKeyword}
-                  onChange={(e) => setNewKeyword(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && handleAddKeyword()}
-                  placeholder="Add keyword (e.g., DAV School Blazers)"
-                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  maxLength={100}
-                />
-                <button
-                  onClick={handleAddKeyword}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
-                >
-                  Add
-                </button>
-              </div>
-              <div className="max-h-32 overflow-y-auto bg-slate-800 rounded p-2 space-y-1">
-                {keywords.length === 0 ? (
-                  <p className="text-xs text-slate-500">No keywords. Add one above.</p>
-                ) : (
-                  keywords.map((keyword, idx) => (
-                    <div key={idx} className="flex items-center justify-between bg-slate-700/50 rounded px-2 py-1 text-xs">
-                      <span className="text-slate-300">{keyword}</span>
-                      <button
-                        onClick={() => handleRemoveKeyword(keyword)}
-                        className="text-red-400 hover:text-red-300 ml-2"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Categories Section */}
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-2">Categories</h3>
-              <div className="flex gap-2 mb-2">
-                <input
-                  type="text"
-                  value={newCategory}
-                  onChange={(e) => setNewCategory(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && handleAddCategory()}
-                  placeholder="Add category"
-                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  maxLength={100}
-                />
-                <button
-                  onClick={handleAddCategory}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
-                >
-                  Add
-                </button>
-              </div>
-              <div className="max-h-32 overflow-y-auto bg-slate-800 rounded p-2 space-y-1">
-                {categories.length === 0 ? (
-                  <p className="text-xs text-slate-500">No categories. Add one above.</p>
-                ) : (
-                  categories.map((category, idx) => (
-                    <div key={idx} className="flex items-center justify-between bg-slate-700/50 rounded px-2 py-1 text-xs">
-                      <span className="text-slate-300">{category}</span>
-                      <button
-                        onClick={() => handleRemoveCategory(category)}
-                        className="text-red-400 hover:text-red-300 ml-2"
-                      >
-                        ✕
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-            </div>
-
-            {/* Quantity Threshold Section */}
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-2">Quantity Threshold</h3>
-              <div className="flex gap-2 mb-2">
-                <input
-                  type="text"
-                  value={quantityMin}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    // Allow empty or numeric values only
-                    if (value === '' || /^\d+$/.test(value)) {
-                      setQuantityMin(value);
-                    }
-                  }}
-                  onKeyPress={(e) => e.key === 'Enter' && handleUpdateQuantity()}
-                  onBlur={handleUpdateQuantity}
-                  placeholder="Minimum quantity"
-                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <input
-                  type="text"
-                  value={quantityUnit}
-                  onChange={(e) => setQuantityUnit(e.target.value)}
-                  onKeyPress={(e) => e.key === 'Enter' && handleUpdateQuantity()}
-                  placeholder="Unit (e.g., piece)"
-                  className="w-28 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <button
-                  onClick={handleUpdateQuantity}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
-                >
-                  Update
-                </button>
-              </div>
-              <p className="text-xs text-slate-500">Current: ≥ {parseInt(quantityMin) || 0} {quantityUnit}</p>
-            </div>
-
-            {/* Order Value Threshold Section */}
-            <div className="mb-6">
-              <h3 className="text-sm font-semibold text-slate-300 mb-2">Order Value Threshold</h3>
-              <div className="flex gap-2 mb-2">
-                <input
-                  type="text"
-                  value={orderValue}
-                  onChange={(e) => {
-                    const value = e.target.value;
-                    // Allow empty or numeric values only
-                    if (value === '' || /^\d+$/.test(value)) {
-                      setOrderValue(value);
-                    }
-                  }}
-                  onKeyPress={(e) => e.key === 'Enter' && handleUpdateOrderValue()}
-                  onBlur={handleUpdateOrderValue}
-                  placeholder="Minimum order value (₹)"
-                  className="flex-1 bg-slate-800 border border-slate-700 text-slate-200 rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                />
-                <button
-                  onClick={handleUpdateOrderValue}
-                  className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-sm"
-                >
-                  Update
-                </button>
-              </div>
-              <p className="text-xs text-slate-500">Current: ≥ ₹{(parseInt(orderValue) || 0).toLocaleString()}</p>
-            </div>
-
-            {/* Import/Export Section */}
-            <div className="flex gap-2">
-              <label className="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm text-center cursor-pointer">
-                Import JSON
-                <input
-                  type="file"
-                  accept=".json"
-                  onChange={handleImportConfig}
-                  className="hidden"
-                />
-              </label>
-              <button
-                onClick={handleExportConfig}
-                className="flex-1 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded text-sm"
-              >
-                Export JSON
-              </button>
-            </div>
-          </div>
+          <SettingsPanel
+            keywords={keywords}
+            categories={categories}
+            newKeyword={newKeyword}
+            newCategory={newCategory}
+            quantityMin={quantityMin}
+            quantityUnit={quantityUnit}
+            orderValue={orderValue}
+            settingsMessage={settingsMessage}
+            onNewKeywordChange={setNewKeyword}
+            onNewCategoryChange={setNewCategory}
+            onQuantityMinChange={setQuantityMin}
+            onQuantityUnitChange={setQuantityUnit}
+            onOrderValueChange={setOrderValue}
+            onAddKeyword={handleAddKeyword}
+            onRemoveKeyword={handleRemoveKeyword}
+            onAddCategory={handleAddCategory}
+            onRemoveCategory={handleRemoveCategory}
+            onUpdateQuantity={handleUpdateQuantity}
+            onUpdateOrderValue={handleUpdateOrderValue}
+            onExport={handleExportConfig}
+            onImport={handleImportConfig}
+            onClose={() => setShowSettings(false)}
+          />
         )}
         {renderContent()}
       </main>

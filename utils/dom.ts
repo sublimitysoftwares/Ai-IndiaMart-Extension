@@ -51,32 +51,24 @@ export const setElementValue = (element: HTMLElement, value: string): void => {
 };
 
 export const findElementByText = (
-  context: Document | ShadowRoot | HTMLElement,
+  context: Document | ShadowRoot | HTMLElement | ParentNode,
   selector: string,
   text: string
 ): HTMLElement | null => {
-  const elements = context.querySelectorAll<HTMLElement>(selector);
-  const lowerText = text.toLowerCase();
-  for (const el of elements) {
-    const content = (el.textContent || '').toLowerCase();
-    if (content.includes(lowerText)) {
-      return el;
-    }
-  }
-  return null;
+  const elements = (context as Element).querySelectorAll<HTMLElement>(selector);
+  const target = text.trim().toLowerCase();
+  return Array.from(elements).find((el) => el.textContent?.trim().toLowerCase() === target) || null;
 };
 
 export const waitForElement = async (
-  finder: () => HTMLElement | null,
-  timeoutMs: number,
-  intervalMs: number = 250
+  factory: () => HTMLElement | null,
+  timeoutMs: number = 8000,
+  intervalMs: number = 150
 ): Promise<HTMLElement | null> => {
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeoutMs) {
-    const element = finder();
-    if (element) {
-      return element;
-    }
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const el = factory();
+    if (el) return el;
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
   return null;
