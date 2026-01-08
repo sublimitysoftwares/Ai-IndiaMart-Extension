@@ -37,7 +37,10 @@ export const handleStartAgent = (
   sender: chrome.runtime.MessageSender,
   sendResponse: (response?: any) => void
 ): boolean => {
+  console.log('[handleStartAgent] Called');
+
   const sendStatus = () => {
+    console.log('[handleStartAgent] Sending status response');
     sendResponse({
       success: true,
       agentActive: getAgentActive(),
@@ -49,11 +52,14 @@ export const handleStartAgent = (
   };
 
   if (getAgentActive() && getLatestLeadsPayload()) {
+    console.log('[handleStartAgent] Agent already active with leads');
     sendStatus();
     return true;
   }
 
+  console.log('[handleStartAgent] Querying for target tab...');
   queryTargetTab().then((tabs) => {
+    console.log('[handleStartAgent] Found tabs:', tabs.length);
     autoContactState.stopped = false;
     autoContactState.enabled = true;
     autoContactState.statistics.sessionStartTime = Date.now();
@@ -61,9 +67,11 @@ export const handleStartAgent = (
     setLatestLeadsPayload(null);
 
     const enableAutoContact = (tabId: number) => {
+      console.log('[handleStartAgent] Enabling auto-contact on tab:', tabId);
       setTimeout(() => {
         sendMessageToTab(tabId, { type: MESSAGE_TYPES.ENABLE_AUTO_CONTACT }, () => {
           if (chrome.runtime.lastError) {
+            console.log('[handleStartAgent] Error enabling auto-contact, retrying...');
             setTimeout(() => {
               sendMessageToTab(tabId, { type: MESSAGE_TYPES.ENABLE_AUTO_CONTACT });
             }, 1000);
@@ -73,17 +81,22 @@ export const handleStartAgent = (
     };
 
     if (tabs.length > 0 && tabs[0].id) {
+      console.log('[handleStartAgent] Tab exists, updating and injecting...');
       updateTab(tabs[0].id, { active: true }).then((tab) => {
         if (tab && tab.id) {
+          console.log('[handleStartAgent] Tab updated, injecting script to tab:', tab.id);
           injectScript(tab.id);
           enableAutoContact(tab.id);
         }
       });
     } else {
+      console.log('[handleStartAgent] Creating new tab with URL:', TARGET_URL);
       createTab({ url: TARGET_URL, active: true }).then((tab) => {
+        console.log('[handleStartAgent] Tab created:', tab?.id);
         if (tab && tab.id) {
           const listener = (tabId: number, changeInfo: chrome.tabs.TabChangeInfo) => {
             if (tabId === tab.id && changeInfo.status === 'complete') {
+              console.log('[handleStartAgent] Tab load complete, injecting script...');
               removeTabUpdateListener(listener);
               injectScript(tabId);
               enableAutoContact(tabId);
@@ -95,6 +108,8 @@ export const handleStartAgent = (
     }
 
     sendStatus();
+  }).catch((err) => {
+    console.error('[handleStartAgent] Error:', err);
   });
 
   return true;
@@ -387,17 +402,22 @@ export const resumeAutomationFromSuspension = async (): Promise<void> => {
 };
 
 const injectScript = async (tabId: number): Promise<void> => {
+  console.log('[injectScript] Attempting to inject content script to tab:', tabId);
   try {
     await executeScript(tabId, ['content.js']);
+    console.log('[injectScript] Script injected successfully');
     setAgentActive(true);
     sendMessageSafe({ type: MESSAGE_TYPES.AGENT_READY });
+    console.log('[injectScript] Sent AGENT_READY message');
 
     if (autoContactState.enabled) {
       setTimeout(() => {
+        console.log('[injectScript] Sending ENABLE_AUTO_CONTACT to tab:', tabId);
         sendMessageToTab(tabId, { type: MESSAGE_TYPES.ENABLE_AUTO_CONTACT });
       }, 1000);
     }
   } catch (error) {
+    console.error('[injectScript] Error injecting script:', (error as Error).message);
     if (!(error as Error).message?.includes('Cannot access a chrome')) {
       // Content script injection handled
     }

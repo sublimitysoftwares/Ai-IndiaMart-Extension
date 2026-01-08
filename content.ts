@@ -76,14 +76,18 @@ import {
 
 // Wrap everything in an IIFE to prevent redeclaration errors
 (() => {
+  console.log('[Content] Content script starting...');
+
   // Check if already loaded
   if ((window as any)[GLOBAL_FLAG]) {
+    console.log('[Content] Already loaded, skipping...');
     return;
   }
-  
+
   // Mark as loaded
   (window as any)[GLOBAL_FLAG] = true;
-  
+  console.log('[Content] Marked as loaded, initializing...');
+
   // State management
   // Auto-contact enabled by default when extension starts
   let isAutoContactEnabled = true;
@@ -133,10 +137,10 @@ import {
   };
 
   const resetAutomationState = ({ stopped = false }: { stopped?: boolean } = {}): void => {
-    
+
     // Stop all timers and observers
     stopAutomationTimers();
-    
+
     // Reset all state flags
     pendingContacts = [];
     filteredLeadsCount = 0;
@@ -149,7 +153,7 @@ import {
     isLeadProcessingRunning = false;
     contactInFlight = false;
     zeroBalanceDetected = false;
-    
+
   };
 
   // Time utilities imported from utils/time
@@ -237,7 +241,7 @@ import {
     window.addEventListener('message', (event) => {
       // Only handle messages from the same window (our own postMessage calls)
       if (event.source !== window) return;
-      
+
       const data = event.data;
       if (!data || data.type !== 'AI_CONTACT_BRIDGE_CLICK') return;
 
@@ -249,18 +253,18 @@ import {
 
       try {
         const mouseInit: MouseEventInit = { bubbles: true, cancelable: true, view: window };
-        
+
         // Try native click method first (most reliable and CSP-safe)
         if (typeof (element as HTMLElement).click === 'function') {
           (element as HTMLElement).click();
           return;
         }
-        
+
         // Fallback: dispatch mouse events for elements that don't support .click()
         element.dispatchEvent(new MouseEvent('mousedown', mouseInit));
         element.dispatchEvent(new MouseEvent('mouseup', mouseInit));
         element.dispatchEvent(new MouseEvent('click', mouseInit));
-        
+
         // If element has onclick property that's a function, try calling it
         // Avoid executing inline onclick strings to prevent CSP issues
         if (typeof (element as any).onclick === 'function') {
@@ -363,9 +367,9 @@ import {
     ];
 
     // If searchDocument is true, prioritize document-wide search (for detail pages)
-    const contexts = searchDocument 
+    const contexts = searchDocument
       ? [document, ...getInteractionContexts(), card].filter(Boolean)
-      : card 
+      : card
         ? [card, ...getInteractionContexts()]
         : [document, ...getInteractionContexts()];
 
@@ -384,7 +388,7 @@ import {
           const label = (candidate.textContent?.trim() || '').toLowerCase();
           const ariaLabel = (candidate.getAttribute('aria-label') || '').toLowerCase();
           const title = (candidate.getAttribute('title') || '').toLowerCase();
-          
+
           // More flexible text matching for "Contact Buyer Now" button
           const contactBuyerPatterns = [
             'contact buyer',
@@ -393,11 +397,11 @@ import {
             'contact buyernow',
             'contactbuyer'
           ];
-          
-          const matchesPattern = contactBuyerPatterns.some(pattern => 
+
+          const matchesPattern = contactBuyerPatterns.some(pattern =>
             label.includes(pattern) || ariaLabel.includes(pattern) || title.includes(pattern)
           );
-          
+
           if (!matchesPattern) continue;
           if (isElementVisible(candidate)) {
             return candidate;
@@ -562,7 +566,7 @@ import {
   // Detect expired/consumed lead error modal
   const detectExpiredLeadModal = (): { detected: boolean; modalElement?: HTMLElement; okButton?: HTMLElement } => {
     const contexts = getInteractionContexts();
-    
+
     // Keywords that indicate expired/consumed lead error
     const errorKeywords = [
       'buylead expired',
@@ -593,10 +597,10 @@ import {
         if (!modal || !isElementVisible(modal)) continue;
 
         const modalText = sanitize(modal.textContent || '').toLowerCase();
-        
+
         // Check if modal text contains error keywords
         const hasErrorKeyword = errorKeywords.some(keyword => modalText.includes(keyword));
-        
+
         if (hasErrorKeyword) {
           // Look for OK button in the modal
           const okButtonSelectors = [
@@ -617,8 +621,8 @@ import {
               if (!isElementVisible(btn)) continue;
               const btnText = sanitize(btn.textContent || '').toLowerCase();
               // Check if button text suggests it's an OK/Close button
-              if (btnText.includes('ok') || btnText.includes('close') || btnText.includes('dismiss') || 
-                  btn.getAttribute('aria-label')?.toLowerCase().includes('ok')) {
+              if (btnText.includes('ok') || btnText.includes('close') || btnText.includes('dismiss') ||
+                btn.getAttribute('aria-label')?.toLowerCase().includes('ok')) {
                 return { detected: true, modalElement: modal, okButton: btn };
               }
             }
@@ -643,7 +647,7 @@ import {
     try {
       const result = await chrome.storage.local.get([SKIPPED_LEADS_KEY]);
       const storedIds = result[SKIPPED_LEADS_KEY];
-      
+
       if (Array.isArray(storedIds) && storedIds.length > 0) {
         skippedLeads = new Set(storedIds.filter((id: any) => typeof id === 'string'));
       } else {
@@ -687,7 +691,7 @@ import {
     try {
       // Look for the specific dialog with id="innerPopup"
       const dialog = document.getElementById('innerPopup') as HTMLElement;
-      
+
       if (!dialog) {
         return { detected: false };
       }
@@ -700,14 +704,14 @@ import {
 
       // Check if dialog contains the "already purchased" text
       const dialogText = dialog.textContent || '';
-      if (!dialogText.toLowerCase().includes('already purchased') && 
-          !dialogText.toLowerCase().includes('you have already purchased')) {
+      if (!dialogText.toLowerCase().includes('already purchased') &&
+        !dialogText.toLowerCase().includes('you have already purchased')) {
         return { detected: false };
       }
 
       // Find the OK button with id="Yes"
       const okButton = document.getElementById('Yes') as HTMLElement;
-      
+
       if (okButton && isElementVisible(okButton)) {
         // Verify button text contains "OK"
         const buttonText = (okButton.textContent || '').trim().toLowerCase();
@@ -741,7 +745,7 @@ import {
   // Dismiss "already purchased" dialog by clicking OK
   const dismissAlreadyPurchasedDialog = async (): Promise<boolean> => {
     const detection = detectAlreadyPurchasedDialog();
-    
+
     if (!detection.detected) {
       return false;
     }
@@ -751,7 +755,7 @@ import {
       if (detection.okButton) {
         await clickWithFallback(detection.okButton, 'OK Button (Already Purchased)');
         await delay(1000); // Wait for dialog to close
-        
+
         // Verify dialog is closed
         const stillVisible = detectAlreadyPurchasedDialog();
         if (!stillVisible.detected) {
@@ -765,7 +769,7 @@ import {
         const okButtons = detection.dialogElement.querySelectorAll<HTMLElement>(
           'button#Yes, button[onclick*="show_alert_off"], .act_btns button'
         );
-        
+
         for (const btn of okButtons) {
           const btnText = (btn.textContent || '').trim().toLowerCase();
           if (btnText.includes('ok') && isElementVisible(btn)) {
@@ -784,7 +788,7 @@ import {
 
   const dismissExpiredLeadModal = async (): Promise<boolean> => {
     const detection = detectExpiredLeadModal();
-    
+
     if (!detection.detected) {
       return false;
     }
@@ -802,7 +806,7 @@ import {
         const okButtons = detection.modalElement.querySelectorAll<HTMLElement>(
           'button, a[role="button"], [role="button"], .btn, .button'
         );
-        
+
         for (const btn of okButtons) {
           if (!isElementVisible(btn)) continue;
           const btnText = sanitize(btn.textContent || '').toLowerCase();
@@ -1064,29 +1068,29 @@ import {
     const showMoreSuggestedBtn = document.querySelector<HTMLElement>('button.show_more');
     if (showMoreSuggestedBtn) {
       const btnText = (showMoreSuggestedBtn.textContent || '').trim();
-      if (btnText.includes('Show More Suggested Leads') && 
-          isElementVisible(showMoreSuggestedBtn) && 
-          !showMoreSuggestedBtn.getAttribute('aria-disabled')) {
+      if (btnText.includes('Show More Suggested Leads') &&
+        isElementVisible(showMoreSuggestedBtn) &&
+        !showMoreSuggestedBtn.getAttribute('aria-disabled')) {
         return showMoreSuggestedBtn;
       }
     }
-    
+
     // Search for "Show More Suggested Leads" button by text (case-insensitive)
     // DO NOT return "SHOW MORE BUYLEADS" buttons - we only want to detect "Show More Suggested Leads"
     const allButtons = document.querySelectorAll<HTMLElement>('button, a[role="button"], [role="button"]');
     for (const btn of allButtons) {
       const btnText = (btn.textContent || '').trim();
       const btnTextUpper = btnText.toUpperCase();
-      
+
       // Skip "SHOW MORE BUYLEADS" buttons - we don't want to detect these
       if (btnTextUpper.includes('SHOW MORE BUYLEADS') || btnTextUpper.includes('SHOW MORE BUY LEADS')) {
         continue; // Skip this button
       }
-      
+
       // Check for "Show More Suggested Leads" button
-      if (btnText.includes('Show More Suggested Leads') && 
-          isElementVisible(btn) && 
-          !btn.getAttribute('aria-disabled')) {
+      if (btnText.includes('Show More Suggested Leads') &&
+        isElementVisible(btn) &&
+        !btn.getAttribute('aria-disabled')) {
         return btn;
       }
     }
@@ -1099,7 +1103,7 @@ import {
     delayMs = AUTO_SCROLL_DELAY_MS
   ): Promise<void> => {
     const existing = getLeadCardElements().length;
-    
+
     // Check if "Show More Suggested Leads" button is already visible
     const showMoreBtnCheck = findShowMoreButton();
     if (showMoreBtnCheck && isElementVisible(showMoreBtnCheck)) {
@@ -1145,11 +1149,11 @@ import {
           if (!showMoreButtonFound) {
             showMoreButtonFound = true;
           }
-          
+
           // Scroll to button to ensure it's fully visible
           showMoreBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
           await delay(1000); // Wait for scroll to complete
-          
+
           // Verify button is still visible after scroll
           const currentBtn = findShowMoreButton();
           if (currentBtn && isElementVisible(currentBtn)) {
@@ -1182,7 +1186,7 @@ import {
 
       // Scroll even more to ensure we're past any lazy-loading thresholds
       await humanScrollBy(randomBetween(400, 600));
-      
+
       // Additional scroll pass for maximum coverage
       await humanScrollBy(randomBetween(200, 400));
 
@@ -1240,7 +1244,7 @@ import {
 
     const finalCount = getLeadCardElements().length;
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
-    
+
     // Don't refresh immediately - wait for 30 second refresh cycle
     if (finalCount >= minCount && isAutoContactEnabled && !isStopped) {
     }
@@ -1284,7 +1288,7 @@ import {
     }
     // Fallback to input value if not found
     city = city || getInputValue(card, 'input[id^="card_city"], input[name^="card_city"]') || '';
-    
+
     // Extract state - exclude nested tooltip spans (.stltips)
     const stateElement = card.querySelector('.lstNwLftLoc .state_click, .state_click');
     let state = '';
@@ -1296,29 +1300,29 @@ import {
     }
     // Fallback to input value if not found
     state = state || getInputValue(card, 'input[id^="card_state"], input[name^="card_state"]') || '';
-    
+
     // Try to get location from dedicated location element, but filter out tooltip text
     const locationElement = card.querySelector('li[title="Location"] span, .location');
     let locationText = '';
-    
+
     if (locationElement) {
       // Use innerText instead of textContent to get only visible text (excludes hidden tooltips)
       locationText = sanitizeOptional((locationElement as HTMLElement).innerText || locationElement.textContent || '') || '';
-      
+
       // Remove tooltip patterns like "Click here to view BuyLeads from..."
       locationText = locationText
         .replace(/Click here to view BuyLeads from[^]*?$/gi, '')
         .replace(/Click here[^]*?$/gi, '')
         .trim();
-      
+
       // If text still contains tooltip keywords or is too long, prefer city+state combination
-      if (locationText.includes('Click here') || 
-          locationText.length > 100 || 
-          locationText.split(',').length > 3) {
+      if (locationText.includes('Click here') ||
+        locationText.length > 100 ||
+        locationText.split(',').length > 3) {
         locationText = '';
       }
     }
-    
+
     // Prioritize city+state combination as it's more reliable
     const location =
       [city, state].filter(Boolean).join(', ') ||
@@ -1394,12 +1398,12 @@ import {
       return { success: false, error: 'Auto-contact disabled.' };
     }
 
-    
+
     // Get cards and find the right card
     const cards = getLeadCardElements();
-    
+
     let card = cards[cardIndex];
-    
+
     // If card not found by index, try to find by matching lead data
     if (!card && lead) {
       for (let i = 0; i < cards.length; i++) {
@@ -1407,19 +1411,19 @@ import {
         const cardText = (testCard.textContent || '').toLowerCase();
         const enquiryTitleLower = (lead.enquiryTitle || '').toLowerCase();
         const companyNameLower = (lead.companyName || '').toLowerCase();
-        
+
         // Match by enquiry title or company name
         if ((enquiryTitleLower && cardText.includes(enquiryTitleLower)) ||
-            (companyNameLower && cardText.includes(companyNameLower))) {
+          (companyNameLower && cardText.includes(companyNameLower))) {
           card = testCard;
           break;
         }
       }
     }
-    
+
     // Detect if we're on a detail page (no cards found or card not available)
     const isDetailPage = !card || cards.length === 0;
-    
+
     if (isDetailPage) {
     }
 
@@ -1447,19 +1451,19 @@ import {
           return located;
         }
       }
-      
+
       // Strategy 2: Document-wide search (especially for detail pages)
       const docButton = findElementByText(document, 'button, a', CONTACT_BUTTON_TEXT);
       if (isElementVisible(docButton)) {
         return docButton;
       }
-      
+
       // Strategy 3: Use enhanced locateContactButton with document search
       const locatedDoc = locateContactButton(card, true);
       if (isElementVisible(locatedDoc)) {
         return locatedDoc;
       }
-      
+
       // Strategy 4: Flexible text search in document
       const allButtons = document.querySelectorAll<HTMLElement>('button, a, [role="button"]');
       for (const btn of allButtons) {
@@ -1469,7 +1473,7 @@ import {
           return btn;
         }
       }
-      
+
       return null;
     }, 15000); // Increased timeout to 15 seconds for better reliability
 
@@ -1481,7 +1485,7 @@ import {
       return { success: false, error: 'Contact Buyer Now button not found.' };
     }
 
-    
+
     // COMMENTED OUT: Contact Buyer Now button click flow
     // // Ensure button is visible and in viewport before clicking
     // contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1805,12 +1809,12 @@ import {
 
     try {
       const result = await chrome.storage.local.get([
-        FILTER_KEYWORDS_KEY, 
+        FILTER_KEYWORDS_KEY,
         FILTER_CATEGORIES_KEY,
         FILTER_QUANTITY_KEY,
         FILTER_ORDER_VALUE_KEY
       ]);
-      
+
       // Load keywords: update if key exists in storage (even if empty array)
       if (result[FILTER_KEYWORDS_KEY] !== undefined) {
         if (Array.isArray(result[FILTER_KEYWORDS_KEY])) {
@@ -1885,10 +1889,10 @@ import {
 
       // Mark config as loaded
       filterConfigLoaded = true;
-      
+
       // Notify popup that config has been loaded (if popup is open)
       if (chrome.runtime?.sendMessage) {
-        chrome.runtime.sendMessage({ 
+        chrome.runtime.sendMessage({
           type: 'FILTER_CONFIG_LOADED',
           config: {
             keywords: enquiryKeywords,
@@ -1910,7 +1914,7 @@ import {
 
   // Save filter keywords and categories to storage
   const saveFilterConfig = async (
-    keywords?: string[], 
+    keywords?: string[],
     categories?: string[],
     quantity?: { min: number; unit: string },
     orderValue?: number
@@ -1988,7 +1992,7 @@ import {
 
     // Filter 1: Enquiry Title Keywords (universal uniform check + keyword list)
     const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
-    
+
     // Primary check: Universal uniform keywords (passes immediately if found)
     const uniformPatterns = [
       /\buniform\b/,
@@ -1999,47 +2003,47 @@ import {
       /\buniform_fabric\b/
     ];
     const hasUniformKeyword = uniformPatterns.some(pattern => pattern.test(titleLower));
-    
+
     // Fallback check: Keyword list (only if uniform not found)
     const hasKeyword = hasUniformKeyword || enquiryKeywords.some(keyword => titleLower.includes(keyword));
-    
+
     if (!hasKeyword) {
       return { passed: false, reason: 'No uniform keywords found', nextContactDelayMinutes: 0 };
     }
-    
+
     // Filter 2: State validation - check if state is in Indian states list
     const location = lead.location || '';
-    
+
     if (!location || location === 'N/A') {
     } else {
       // Extract state from location (format: "City, State" or just "State")
       // Split by comma and get the last part (state)
       const locationParts = location.split(',').map(part => part.trim());
       const state = locationParts[locationParts.length - 1]; // Get last part (state)
-      
+
       // Check if state matches any Indian state (case-insensitive)
       const stateLower = state.toLowerCase();
-      const isValidIndianState = INDIAN_STATES.some(indianState => 
+      const isValidIndianState = INDIAN_STATES.some(indianState =>
         stateLower === indianState.toLowerCase()
       );
-      
+
       if (!isValidIndianState) {
         return { passed: false, reason: `State "${state}" not in Indian states list`, nextContactDelayMinutes: 0 };
       }
     }
-    
+
     // Filter 3: Quantity ≥ threshold (flexible - check number first, unit match optional)
-    
+
     // Special handling: If title contains "coat", use lower quantity threshold (10 pieces)
     const hasCoatKeyword = titleLower.includes('coat');
     const effectiveQuantityThreshold = hasCoatKeyword ? 10 : quantityThreshold.min;
-    
+
     if (hasCoatKeyword) {
     }
-    
+
     // First check: quantity number must meet threshold
     const quantityMeetsThreshold = typeof lead.quantity === 'number' && lead.quantity >= effectiveQuantityThreshold;
-    
+
     if (!quantityMeetsThreshold) {
       return {
         passed: false,
@@ -2047,7 +2051,7 @@ import {
         nextContactDelayMinutes: 0
       };
     }
-    
+
     // Second check: if quantityRaw is available, verify it includes the expected unit (optional check)
     // This is a soft check - if quantityRaw doesn't exist or doesn't match unit, still pass if quantity number is valid
     if (typeof lead.quantityRaw === 'string' && lead.quantityRaw.trim()) {
@@ -2057,20 +2061,20 @@ import {
       if (!hasUnitMatch) {
       }
     }
-    
+
     // Filter 4: Category match
     const categoryLower = (lead.category || '').toLowerCase();
-    
+
     // First check: automatically pass if category contains "uniform" or "uniform fabric"
     const uniformKeywords = ['uniform', 'uniform fabric', 'uniforms', 'uniform-fabric', 'uniform_fabric'];
     const categoryHasUniform = uniformKeywords.some(keyword => categoryLower.includes(keyword));
-    
+
     // Second check: fall back to allowedCategories list if no uniform keyword found
     const hasCategory = categoryHasUniform || allowedCategories.some((keyword) => {
       const normalized = keyword.toLowerCase();
       return categoryLower.includes(normalized) || normalized.includes(categoryLower);
     });
-    
+
     // Only fail if category exists but doesn't match either condition
     if (!hasCategory && lead.category) {
       return { passed: false, reason: 'Category not in allowed list', nextContactDelayMinutes: 0 };
@@ -2078,17 +2082,17 @@ import {
     if (!lead.category) {
     } else {
     }
-    
+
     // Filter 5: Probable Order Value ≥ ₹10,000
     const orderValue = lead.probableOrderValueMin || lead.probableOrderValueMax || 0;
     if (orderValue < orderValueMin) {
       return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
     }
-    
+
     // Generate random delay between 1-10 minutes for qualified leads
     const delayOptions = [1, 5, 10];
     const randomDelay = delayOptions[Math.floor(Math.random() * delayOptions.length)];
-    
+
     return { passed: true, reason: 'Meets all criteria', nextContactDelayMinutes: randomDelay };
   };
 
@@ -2171,34 +2175,34 @@ import {
     if (!isAutoContactEnabled || isStopped) {
       return false;
     }
-    
+
     // Check if this lead was already processed/contacted to prevent duplicates
     if (processedLeads.has(lead.leadId)) {
       return false;
     }
-    
+
     if (wasLeadContactedRecently(lead.leadId)) {
       return false;
     }
-    
+
     return withContactLock(async () => {
       // Double-check after acquiring lock (another thread might have processed it)
       if (processedLeads.has(lead.leadId)) {
         return false;
       }
-      
+
       // Mark as processing immediately to prevent concurrent attempts
       processedLeads.add(lead.leadId);
-      
+
       // Check again after acquiring lock
       if (!isAutoContactEnabled || isStopped) {
         processedLeads.delete(lead.leadId); // Remove from processed since we didn't actually contact
         return false;
       }
-      
+
       try {
         const result = await performContactFlow(cardIndex, lead);
-        
+
         // Check again after contact flow completes
         if (!isAutoContactEnabled || isStopped) {
           if (!result.success) {
@@ -2206,12 +2210,12 @@ import {
           }
           return false;
         }
-        
+
         if (result.success) {
           // Lead is already in processedLeads (added before contact attempt)
           lastContactTime = Date.now();
           contactedLeadsCount++;
-          
+
           // Persist leads to cache storage (filtered leads will be persisted separately when filtering completes)
           if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
             const leads = scrapeLeads();
@@ -2219,7 +2223,7 @@ import {
               'indiamart_leads_cache': leads,
             });
           }
-          
+
           chrome.runtime.sendMessage({
             type: 'AUTO_CONTACT_SUCCESS',
             leadId: lead.leadId,
@@ -2229,11 +2233,11 @@ import {
             totalFiltered: filteredLeadsCount,
             tabHidden: document.hidden
           });
-          
-          
+
+
           // Note: Refresh check is handled after all leads are processed in processLeadsWithFiltering
           // This ensures we check once after processing all leads, not multiple times during processing
-          
+
           return true;
         } else {
           // Contact failed, remove from processedLeads so it can be retried later
@@ -2247,7 +2251,7 @@ import {
         processedLeads.delete(lead.leadId);
         registerAutomationError((error as Error)?.message || 'Unknown contact flow error');
       }
-      
+
       return false;
     });
   };
@@ -2305,7 +2309,7 @@ import {
 
       // Scroll until "Show More Suggested Leads" button is visible (don't click it)
       await ensureMinimumLeadCards(MIN_LEAD_TARGET);
-      
+
       // Process ALL leads available on the page (not limited to 50)
       const leads = scrapeLeads();
       const skipIndexes = pickRandomSkipIndexes(leads.length);
@@ -2324,7 +2328,7 @@ import {
         if (!isAutoContactEnabled || isStopped) {
           break;
         }
-        
+
         if (processedLeads.has(lead.leadId)) {
           continue;
         }
@@ -2386,8 +2390,8 @@ import {
             if (wasLeadContactedRecently(lead.leadId)) {
               continue;
             }
-            
-            
+
+
             const contacted = await processFilteredLead(lead, lead.cardIndex || 0);
             if (contacted) {
               await incrementDailyContactCount();
@@ -2397,7 +2401,7 @@ import {
               clearAutomationErrors();
               cycleActions.push(`Contacted ${lead.companyName || lead.leadId}`);
               // contactedLeadsCount is incremented in processFilteredLead, no need to increment here
-              
+
               // Add delay before processing next lead
               if (typeof lead.nextContactDelayMinutes === 'number' && lead.nextContactDelayMinutes > 0) {
                 await delay(lead.nextContactDelayMinutes * 60 * 1000);
@@ -2427,7 +2431,7 @@ import {
       // Update final counts for statistics
       filteredLeadsCount = filteredLeads.length;
       pendingContacts = [...filteredLeads];
-      
+
       // Persist filtered leads to cache storage after filtering completes
       if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
         chrome.storage.local.set({
@@ -2469,26 +2473,26 @@ import {
       // If so, refresh immediately instead of waiting 30 seconds
       const noLeadsPassedFilters = filteredLeads.length === 0;
       const allFilteredLeadsContacted = filteredLeads.length > 0 && contactedLeadsCount >= filteredLeads.length;
-      
+
       // Check if there are any remaining leads that could be contacted
       // (leads that passed filters but haven't been contacted yet)
       const remainingContactableLeads = filteredLeads.filter(lead => {
-        return !processedLeads.has(lead.leadId) && 
-               !wasLeadContactedRecently(lead.leadId) &&
-               !isLeadSkipped(lead.leadId);
+        return !processedLeads.has(lead.leadId) &&
+          !wasLeadContactedRecently(lead.leadId) &&
+          !isLeadSkipped(lead.leadId);
       }).length;
 
       const noLeadsRemainToContact = remainingContactableLeads === 0;
 
-      if ((noLeadsPassedFilters || allFilteredLeadsContacted || noLeadsRemainToContact) && 
-          isAutoContactEnabled && 
-          !isStopped) {
+      if ((noLeadsPassedFilters || allFilteredLeadsContacted || noLeadsRemainToContact) &&
+        isAutoContactEnabled &&
+        !isStopped) {
         // Clear the periodic refresh timer since we're refreshing now
         if (pageRefreshTimer) {
           clearTimeout(pageRefreshTimer);
           pageRefreshTimer = null;
         }
-        
+
         // Refresh immediately
         lastRefreshTime = Date.now();
         await delay(1000);
@@ -2521,10 +2525,10 @@ import {
           processLeadsWithFiltering();
         }, 1000); // Small delay to ensure page is fully loaded
       }
-      
+
       tabWentInactiveTime = 0; // Reset
     }
-    
+
     lastProcessingTime = Date.now();
     lastVisibilityChangeTime = Date.now();
   });
@@ -2558,7 +2562,7 @@ import {
       sendResponse({ success: true });
       return true;
     }
-    
+
     if (message.type === 'ENABLE_AUTO_CONTACT') {
       isStopped = false;
       isAutoContactEnabled = true;
@@ -2572,7 +2576,7 @@ import {
       sendResponse({ success: true });
       return true;
     }
-    
+
     if (message.type === 'DISABLE_AUTO_CONTACT') {
       resetAutomationState({ stopped: false });
       isLeadProcessingRunning = false; // Force stop any ongoing processing
@@ -2580,37 +2584,37 @@ import {
       sendResponse({ success: true });
       return true;
     }
-    
+
     if (message.type === 'STOP_AGENT') {
-      
+
       // Force stop all flags immediately
       isStopped = true;
       isAutoContactEnabled = false;
       isLeadProcessingRunning = false;
       contactInFlight = false;
-      
+
       // Reset all automation state (stops timers, observers, etc.)
       resetAutomationState({ stopped: true });
-      
+
       sendResponse({ success: true });
       return true;
     }
-    
+
     if (message.type === 'SCRAPE_AND_FILTER') {
       processLeadsWithFiltering();
       sendResponse({ success: true });
       return true;
     }
-    
+
 
     if (message.type === 'FILTER_KEYWORDS_UPDATED') {
       // Reload filter config from storage and re-run filtering if active
       loadFilterConfig()
         .then(() => {
-          
+
           // Notify popup of updated criteria
           chrome.runtime.sendMessage({ type: 'FILTER_CRITERIA_UPDATE', payload: getFilterCriteria() });
-          
+
           // Re-run filtering if auto-contact is enabled
           if (isAutoContactEnabled && !isStopped) {
             processLeadsWithFiltering();
@@ -2665,7 +2669,7 @@ import {
         });
     }, SCRAPE_INTERVAL_MS);
   };
-  
+
   // Listen for storage changes to reload filter config automatically
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, areaName) => {
