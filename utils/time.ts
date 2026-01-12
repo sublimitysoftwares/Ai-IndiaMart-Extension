@@ -3,7 +3,7 @@
 export const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-export const randomBetween = (min: number, max: number): number => 
+export const randomBetween = (min: number, max: number): number =>
   Math.random() * (max - min) + min;
 
 export const randomIntBetween = (min: number, max: number): number =>
@@ -32,7 +32,7 @@ export const describeScheduleWindow = (isWorkingHours: boolean): string =>
   isWorkingHours ? '09:00-21:00' : '21:00-09:00';
 
 export const getStealthDelayMs = (): number => {
-  // Fixed 30 second refresh interval
-  const delaySeconds = 30;
-  return delaySeconds * 1000; // 30 seconds in milliseconds
+  // Fixed 120 second refresh interval (2 minutes)
+  const delaySeconds = 120;
+  return delaySeconds * 1000; // 120 seconds in milliseconds
 };

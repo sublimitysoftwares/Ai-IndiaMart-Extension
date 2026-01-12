@@ -2,7 +2,7 @@
 
 import type { Lead, SuspensionState, DailyContactStats } from '../types';
 import { getStorage, setStorage, removeStorage } from '../services/chrome/storage';
-import { BUY_LEAD_SUSPENSION_KEY } from '../constants/storage';
+import { BUY_LEAD_SUSPENSION_KEY, AGENT_STATE } from '../constants/storage';
 import { calculateNextMidnight } from '../utils/time';
 
 export interface AutoContactState {
@@ -21,11 +21,43 @@ export let autoContactState: AutoContactState = {
   enabled: false,
   stopped: false,
   processedLeads: new Set<string>(),
-  lastContactTime: 0,
+  lastContactTime: 0, // Not persisted
   statistics: {
     totalContacted: 0,
     totalFiltered: 0,
-    sessionStartTime: Date.now()
+    sessionStartTime: Date.now() // Not persisted, resets on restart
+  }
+};
+
+// Simplified state for storage to avoid quota limits
+interface StoredAgentState {
+  enabled: boolean;
+  stopped: boolean;
+}
+
+export const persistAutoContactState = async (): Promise<void> => {
+  try {
+    const stateToStore: StoredAgentState = {
+      enabled: autoContactState.enabled,
+      stopped: autoContactState.stopped,
+    };
+    await setStorage({ [AGENT_STATE]: stateToStore });
+  } catch (error) {
+    console.error('Failed to persist agent state:', error);
+  }
+};
+
+export const initializeAutoContactState = async (): Promise<void> => {
+  try {
+    const result = await getStorage(AGENT_STATE);
+    const stored = result[AGENT_STATE] as StoredAgentState | undefined;
+    if (stored) {
+      autoContactState.enabled = stored.enabled;
+      autoContactState.stopped = stored.stopped;
+      console.log('[StateManager] Restored agent state:', stored);
+    }
+  } catch (error) {
+    console.error('Failed to initialize agent state:', error);
   }
 };
 

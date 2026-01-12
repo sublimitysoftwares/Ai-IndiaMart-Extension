@@ -41,6 +41,7 @@ import {
   FILTER_QUANTITY_KEY,
   FILTER_ORDER_VALUE_KEY,
   DAILY_CONTACT_STATS_KEY,
+  STORAGE_KEYS,
 } from './constants/storage';
 import { DEFAULT_CONTACT_MESSAGE } from './constants/text';
 import {
@@ -179,13 +180,120 @@ import {
     backoffUntil = Math.min(backoffUntil, Date.now());
   };
 
+  // ========== SCRAPE-ONLY MODE: Store passed leads for testing ==========
+  interface PassedLeadLog {
+    lead: Lead;
+    filterReason: string;
+    timestamp: number;
+    dateString: string;
+  }
+
+  // Store a lead that passed filter criteria to chrome.storage
+  const storePassedLead = async (lead: Lead, filterReason: string): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      console.log('[Content] storePassedLead - chrome.storage not available');
+      return;
+    }
+
+    const logEntry: PassedLeadLog = {
+      lead,
+      filterReason,
+      timestamp: Date.now(),
+      dateString: new Date().toISOString(),
+    };
+
+    try {
+      // Get existing logs
+      const result = await chrome.storage.local.get(STORAGE_KEYS.PASSED_LEADS_LOG);
+      const existingLogs: PassedLeadLog[] = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
+
+      // Check if lead already exists (by leadId)
+      const alreadyExists = existingLogs.some(entry => entry.lead.leadId === lead.leadId);
+      if (alreadyExists) {
+        console.log('[Content] storePassedLead - Lead already logged:', lead.leadId);
+        return;
+      }
+
+      // Add new entry
+      existingLogs.push(logEntry);
+
+      // Store updated logs
+      await chrome.storage.local.set({ [STORAGE_KEYS.PASSED_LEADS_LOG]: existingLogs });
+      console.log('[Content] storePassedLead - Stored lead:', lead.leadId, 'Total logged:', existingLogs.length);
+    } catch (error) {
+      console.error('[Content] storePassedLead - Error:', error);
+    }
+  };
+
+  // Get count of stored passed leads
+  const getPassedLeadsCount = async (): Promise<number> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return 0;
+    }
+    try {
+      const result = await chrome.storage.local.get(STORAGE_KEYS.PASSED_LEADS_LOG);
+      const logs: PassedLeadLog[] = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
+      return logs.length;
+    } catch {
+      return 0;
+    }
+  };
+
+  // Interface for rejected lead log entry
+  interface RejectedLeadLog {
+    lead: Lead;
+    rejectionReason: string;
+    timestamp: number;
+    dateString: string;
+  }
+
+  // Store a lead that failed filter criteria to chrome.storage
+  const storeRejectedLead = async (lead: Lead, rejectionReason: string): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return;
+    }
+
+    const logEntry: RejectedLeadLog = {
+      lead,
+      rejectionReason,
+      timestamp: Date.now(),
+      dateString: new Date().toISOString(),
+    };
+
+    try {
+      // Get existing logs
+      const result = await chrome.storage.local.get(STORAGE_KEYS.REJECTED_LEADS_LOG);
+      const existingLogs: RejectedLeadLog[] = result[STORAGE_KEYS.REJECTED_LEADS_LOG] || [];
+
+      // Check if lead already exists (by leadId)
+      const alreadyExists = existingLogs.some(entry => entry.lead.leadId === lead.leadId);
+      if (alreadyExists) {
+        return;
+      }
+
+      // Add new entry
+      existingLogs.push(logEntry);
+
+      // Store updated logs
+      await chrome.storage.local.set({ [STORAGE_KEYS.REJECTED_LEADS_LOG]: existingLogs });
+      console.log('[Content] storeRejectedLead - Stored rejected lead:', lead.leadId, 'Reason:', rejectionReason, 'Total:', existingLogs.length);
+    } catch (error) {
+      console.error('[Content] storeRejectedLead - Error:', error);
+    }
+  };
+  // ========== END SCRAPE-ONLY MODE ==========
+
   const syncAutoContactState = () => {
+    console.log('[Content] syncAutoContactState called');
     if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+      console.log('[Content] syncAutoContactState - chrome.runtime not available');
       return;
     }
 
     chrome.runtime.sendMessage({ type: 'GET_AGENT_STATUS' }, (response) => {
+      console.log('[Content] syncAutoContactState - GET_AGENT_STATUS response:', response);
       if (chrome.runtime.lastError) {
+        console.log('[Content] syncAutoContactState - runtime error:', chrome.runtime.lastError);
         return;
       }
 
@@ -193,16 +301,21 @@ import {
         const previousState = isAutoContactEnabled;
         isAutoContactEnabled = Boolean(response.autoContactEnabled);
         isStopped = Boolean(response.agentStopped);
+        console.log('[Content] syncAutoContactState - previousState:', previousState, 'isAutoContactEnabled:', isAutoContactEnabled, 'isStopped:', isStopped);
 
         if (isAutoContactEnabled && !isStopped) {
           if (!previousState) {
+            console.log('[Content] syncAutoContactState - Auto-contact newly enabled, starting loops...');
           }
           startScrapeLoop();
           setupPeriodicProcessing();
           setupPeriodicRefresh();
         } else {
+          console.log('[Content] syncAutoContactState - Resetting automation (stopped or disabled)');
           resetAutomationState({ stopped: isStopped });
         }
+      } else {
+        console.log('[Content] syncAutoContactState - No success in response');
       }
     });
   };
@@ -901,7 +1014,9 @@ import {
   };
 
   const getLeadCardElements = (): HTMLElement[] => {
+    console.log('[Content] getLeadCardElements called');
     const contexts = getLeadSearchContexts();
+    console.log('[Content] getLeadCardElements - Searching in', contexts.length, 'contexts');
     const seen = new Set<HTMLElement>();
     const cards: HTMLElement[] = [];
 
@@ -909,18 +1024,21 @@ import {
       const contextLabel = describeContext(ctx, ctxIndex);
       LEAD_CARD_SELECTORS.forEach((selector) => {
         const matches = Array.from(ctx.querySelectorAll<HTMLElement>(selector));
+        if (matches.length > 0) {
+          console.log('[Content] getLeadCardElements - Found', matches.length, 'matches for selector:', selector, 'in context:', contextLabel);
+        }
         matches.forEach((match) => {
           if (!seen.has(match)) {
             seen.add(match);
             cards.push(match);
           }
         });
-        if (matches.length > 0) {
-        }
       });
     });
 
+    console.log('[Content] getLeadCardElements - Total unique cards found:', cards.length);
     if (cards.length === 0) {
+      console.log('[Content] getLeadCardElements - No lead cards found! Selectors used:', LEAD_CARD_SELECTORS);
       if (!hasLoggedNoLeadCards) {
         hasLoggedNoLeadCards = true;
       }
@@ -1102,28 +1220,35 @@ import {
     maxAttempts = AUTO_SCROLL_MAX_ATTEMPTS,
     delayMs = AUTO_SCROLL_DELAY_MS
   ): Promise<void> => {
+    console.log('[Content] ensureMinimumLeadCards called. minCount:', minCount, 'maxAttempts:', maxAttempts);
     const existing = getLeadCardElements().length;
+    console.log('[Content] ensureMinimumLeadCards - Existing lead cards:', existing);
 
     // Check if "Show More Suggested Leads" button is already visible
     const showMoreBtnCheck = findShowMoreButton();
     if (showMoreBtnCheck && isElementVisible(showMoreBtnCheck)) {
       const btnText = (showMoreBtnCheck.textContent || '').trim();
+      console.log('[Content] ensureMinimumLeadCards - Found show more button:', btnText);
       // Check if it's the "Show More Suggested Leads" button (not "SHOW MORE BUYLEADS")
       if (btnText.includes('Show More Suggested Leads')) {
+        console.log('[Content] ensureMinimumLeadCards - Scrolling to Show More Suggested Leads button');
         // Scroll to it to ensure it's fully in view, then stop
         showMoreBtnCheck.scrollIntoView({ behavior: 'smooth', block: 'center' });
         await delay(1000);
         return;
       }
+    } else {
+      console.log('[Content] ensureMinimumLeadCards - No show more button found yet');
     }
 
     const now = Date.now();
     // Remove cooldown restriction - allow continuous scrolling
     if (existing >= minCount && now - lastAutoScrollRun < AUTO_SCROLL_COOLDOWN_MS) {
+      console.log('[Content] ensureMinimumLeadCards - Skipping due to cooldown or enough leads');
       return;
     }
     lastAutoScrollRun = now;
-
+    console.log('[Content] ensureMinimumLeadCards - Starting auto-scroll loop...');
 
     const startTime = Date.now();
     let attempt = 0;
@@ -1385,8 +1510,14 @@ import {
   };
 
   const scrapeLeads = (): Lead[] => {
+    console.log('[Content] scrapeLeads called');
     const cards = getLeadCardElements();
+    console.log('[Content] scrapeLeads - Found', cards.length, 'lead cards on page');
     const leads = cards.map((card, index) => extractLead(card, index));
+    console.log('[Content] scrapeLeads - Extracted', leads.length, 'leads');
+    if (leads.length > 0) {
+      console.log('[Content] scrapeLeads - First lead:', leads[0]);
+    }
     return leads;
   };
 
@@ -2381,50 +2512,23 @@ import {
           filteredLeads.push(lead);
           filteredLeadsCount = filteredLeads.length;
 
-          // Immediately process this lead if auto-contact is enabled and quota allows
-          if (isAutoContactEnabled && !isStopped && canContactMoreToday()) {
-            // Double-check that lead hasn't been processed/contacted already
-            if (processedLeads.has(lead.leadId)) {
-              continue;
-            }
-            if (wasLeadContactedRecently(lead.leadId)) {
-              continue;
-            }
+          // ========== SCRAPE-ONLY MODE: Store lead instead of contacting ==========
+          // Store the passed lead for later export (no contact flow)
+          await storePassedLead(lead, filterResult.reason);
+          cycleActions.push(`Stored passed lead: ${lead.companyName || lead.leadId}`);
+          console.log('[Content] SCRAPE-ONLY: Stored passed lead:', lead.leadId, lead.companyName);
 
+          // Mark as processed so we don't process again
+          processedLeads.add(lead.leadId);
 
-            const contacted = await processFilteredLead(lead, lead.cardIndex || 0);
-            if (contacted) {
-              await incrementDailyContactCount();
-              // Note: contactedLeadHistory is already set in performContactFlow
-              // Note: contactedLeadsCount is already incremented in processFilteredLead, so we don't increment it here
-              purgeStaleContactHistory();
-              clearAutomationErrors();
-              cycleActions.push(`Contacted ${lead.companyName || lead.leadId}`);
-              // contactedLeadsCount is incremented in processFilteredLead, no need to increment here
-
-              // Add delay before processing next lead
-              if (typeof lead.nextContactDelayMinutes === 'number' && lead.nextContactDelayMinutes > 0) {
-                await delay(lead.nextContactDelayMinutes * 60 * 1000);
-              } else {
-                await delay(randomBetween(1000, 3000));
-              }
-            } else {
-              const errMsg = `Failed to contact ${lead.companyName || lead.leadId}`;
-              cycleErrors.push(errMsg);
-              registerAutomationError(errMsg);
-            }
-
-            // Check if daily quota reached after contact
-            if (!canContactMoreToday()) {
-              cycleActions.push('Daily quota met mid-cycle. Remaining leads deferred.');
-              notifyDailyLimitReached();
-              break; // Stop processing more leads
-            }
-          } else if (!canContactMoreToday()) {
-            cycleActions.push('Daily quota reached. Skipping remaining leads.');
-            notifyDailyLimitReached();
-            break; // Stop processing more leads
-          }
+          // Small delay between processing leads
+          await delay(randomBetween(500, 1500));
+          // ========== END SCRAPE-ONLY MODE ==========
+        } else {
+          // ========== SCRAPE-ONLY MODE: Store rejected lead with reason ==========
+          await storeRejectedLead(lead, filterResult.reason);
+          processedLeads.add(lead.leadId);
+          // ========== END SCRAPE-ONLY MODE ==========
         }
       }
 
@@ -2493,9 +2597,10 @@ import {
           pageRefreshTimer = null;
         }
 
-        // Refresh immediately
+        // Refresh immediately (Wait 2 minutes before reloading)
         lastRefreshTime = Date.now();
-        await delay(1000);
+        console.log('[Content] Cycle complete. Waiting 2 minutes before reload...');
+        await delay(120000);
         window.location.reload();
         return; // Exit early since page will reload
       }
@@ -2534,22 +2639,29 @@ import {
   });
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    console.log('[Content] Message received:', message?.type, message);
+
     if (!message || typeof message !== 'object') {
+      console.log('[Content] Invalid message, ignoring');
       return;
     }
 
     if (message.type === 'SCRAPE_NOW') {
+      console.log('[Content] SCRAPE_NOW - Starting ensureMinimumLeadCards...');
       ensureMinimumLeadCards(MIN_LEAD_TARGET)
         .catch((error) => {
-          // Auto-scroll failed before SCRAPE_NOW
+          console.error('[Content] Auto-scroll failed before SCRAPE_NOW:', error);
         })
         .finally(() => {
-          sendResponse({ leads: scrapeLeads() });
+          const leads = scrapeLeads();
+          console.log('[Content] SCRAPE_NOW - Scraped leads count:', leads.length);
+          sendResponse({ leads });
         });
       return true;
     }
 
     if (message.type === 'CONTACT_LEAD') {
+      console.log('[Content] CONTACT_LEAD - cardIndex:', message.cardIndex);
       const { cardIndex, lead: leadPayload } = message;
       performContactFlow(cardIndex, leadPayload)
         .then((result) => sendResponse(result))
@@ -2558,26 +2670,33 @@ import {
     }
 
     if (message.type === 'REFRESH_PAGE') {
+      console.log('[Content] REFRESH_PAGE - Reloading page');
       window.location.reload();
       sendResponse({ success: true });
       return true;
     }
 
     if (message.type === 'ENABLE_AUTO_CONTACT') {
+      console.log('[Content] ENABLE_AUTO_CONTACT - Starting automation...');
       isStopped = false;
       isAutoContactEnabled = true;
       stopAutomationTimers();
+      console.log('[Content] Starting scrape loop...');
       startScrapeLoop();
+      console.log('[Content] Setting up periodic processing...');
       setupPeriodicProcessing(); // Set up periodic processing for logs
       setupPeriodicRefresh(); // Set up periodic refresh
+      console.log('[Content] Processing leads with filtering...');
       processLeadsWithFiltering();
       zeroBalanceDetected = false;
       startZeroBalanceObserver();
+      console.log('[Content] ENABLE_AUTO_CONTACT - Complete');
       sendResponse({ success: true });
       return true;
     }
 
     if (message.type === 'DISABLE_AUTO_CONTACT') {
+      console.log('[Content] DISABLE_AUTO_CONTACT - Stopping automation');
       resetAutomationState({ stopped: false });
       isLeadProcessingRunning = false; // Force stop any ongoing processing
       contactInFlight = false; // Cancel any in-flight contacts
@@ -2586,6 +2705,7 @@ import {
     }
 
     if (message.type === 'STOP_AGENT') {
+      console.log('[Content] STOP_AGENT - Force stopping all');
 
       // Force stop all flags immediately
       isStopped = true;
@@ -2601,6 +2721,7 @@ import {
     }
 
     if (message.type === 'SCRAPE_AND_FILTER') {
+      console.log('[Content] SCRAPE_AND_FILTER');
       processLeadsWithFiltering();
       sendResponse({ success: true });
       return true;
@@ -2608,6 +2729,7 @@ import {
 
 
     if (message.type === 'FILTER_KEYWORDS_UPDATED') {
+      console.log('[Content] FILTER_KEYWORDS_UPDATED - Reloading filter config');
       // Reload filter config from storage and re-run filtering if active
       loadFilterConfig()
         .then(() => {
@@ -2621,33 +2743,97 @@ import {
           }
         })
         .catch((error) => {
+          console.error('[Content] Error loading filter config:', error);
         });
       sendResponse({ success: true });
       return true;
     }
+
+    // ========== SCRAPE-ONLY MODE: Message handlers for passed leads log ==========
+    if (message.type === 'GET_PASSED_LEADS_LOG') {
+      console.log('[Content] GET_PASSED_LEADS_LOG');
+      chrome.storage.local.get(STORAGE_KEYS.PASSED_LEADS_LOG, (result) => {
+        const logs = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
+        sendResponse({ success: true, logs });
+      });
+      return true;
+    }
+
+    if (message.type === 'GET_PASSED_LEADS_COUNT') {
+      console.log('[Content] GET_PASSED_LEADS_COUNT');
+      chrome.storage.local.get(STORAGE_KEYS.PASSED_LEADS_LOG, (result) => {
+        const logs = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
+        sendResponse({ success: true, count: logs.length });
+      });
+      return true;
+    }
+
+    if (message.type === 'CLEAR_PASSED_LEADS_LOG') {
+      console.log('[Content] CLEAR_PASSED_LEADS_LOG');
+      chrome.storage.local.remove(STORAGE_KEYS.PASSED_LEADS_LOG, () => {
+        sendResponse({ success: true });
+      });
+      return true;
+    }
+
+    // ========== REJECTED LEADS LOG HANDLERS ==========
+    if (message.type === 'GET_REJECTED_LEADS_LOG') {
+      console.log('[Content] GET_REJECTED_LEADS_LOG');
+      chrome.storage.local.get(STORAGE_KEYS.REJECTED_LEADS_LOG, (result) => {
+        const logs = result[STORAGE_KEYS.REJECTED_LEADS_LOG] || [];
+        sendResponse({ success: true, logs });
+      });
+      return true;
+    }
+
+    if (message.type === 'GET_REJECTED_LEADS_COUNT') {
+      console.log('[Content] GET_REJECTED_LEADS_COUNT');
+      chrome.storage.local.get(STORAGE_KEYS.REJECTED_LEADS_LOG, (result) => {
+        const logs = result[STORAGE_KEYS.REJECTED_LEADS_LOG] || [];
+        sendResponse({ success: true, count: logs.length });
+      });
+      return true;
+    }
+
+    if (message.type === 'CLEAR_REJECTED_LEADS_LOG') {
+      console.log('[Content] CLEAR_REJECTED_LEADS_LOG');
+      chrome.storage.local.remove(STORAGE_KEYS.REJECTED_LEADS_LOG, () => {
+        sendResponse({ success: true });
+      });
+      return true;
+    }
+    // ========== END SCRAPE-ONLY MODE ==========
   });
 
   // Initial scraping
   const startScrapeLoop = () => {
+    console.log('[Content] startScrapeLoop called. initialScrapeInterval:', !!initialScrapeInterval, 'isStopped:', isStopped, 'isAutoContactEnabled:', isAutoContactEnabled);
+
     if (initialScrapeInterval || isStopped || !isAutoContactEnabled) {
+      console.log('[Content] startScrapeLoop - Early exit, conditions not met');
       return;
     }
 
+    console.log('[Content] startScrapeLoop - Starting interval...');
     let attempts = 0;
     initialScrapeInterval = setInterval(() => {
       if (!isAutoContactEnabled || isStopped) {
+        console.log('[Content] startScrapeLoop - Auto-contact disabled or stopped, clearing timers');
         stopAutomationTimers();
         return;
       }
 
       attempts += 1;
+      console.log('[Content] startScrapeLoop - Attempt', attempts, ', calling ensureMinimumLeadCards...');
       ensureMinimumLeadCards(MIN_LEAD_TARGET)
         .catch((error) => {
-          // Auto-scroll failed during initial scrape
+          console.error('[Content] Auto-scroll failed during initial scrape:', error);
         })
         .finally(() => {
           const leads = scrapeLeads();
+          console.log('[Content] startScrapeLoop - Scraped leads:', leads.length);
           if (leads.length > 0) {
+            console.log('[Content] startScrapeLoop - Leads found, clearing interval and sending data');
             if (initialScrapeInterval) {
               clearInterval(initialScrapeInterval);
               initialScrapeInterval = null;
@@ -2657,6 +2843,7 @@ import {
             // Also run filtering
             processLeadsWithFiltering();
           } else if (attempts >= SCRAPE_MAX_ATTEMPTS) {
+            console.log('[Content] startScrapeLoop - Max attempts reached, no leads found');
             if (initialScrapeInterval) {
               clearInterval(initialScrapeInterval);
               initialScrapeInterval = null;
@@ -2668,6 +2855,7 @@ import {
           }
         });
     }, SCRAPE_INTERVAL_MS);
+    console.log('[Content] startScrapeLoop - Interval started');
   };
 
   // Listen for storage changes to reload filter config automatically

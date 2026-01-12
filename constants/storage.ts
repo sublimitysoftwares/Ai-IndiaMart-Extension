@@ -11,6 +11,9 @@ export const STORAGE_KEYS = {
   LEADS_CACHE: 'indiamart_leads_cache',
   FILTERED_LEADS_CACHE: 'indiamart_filtered_leads_cache',
   CONTACTED_LEADS_CACHE: 'indiamart_contacted_leads_cache',
+  PASSED_LEADS_LOG: 'indiamart_passed_leads_log',
+  REJECTED_LEADS_LOG: 'indiamart_rejected_leads_log',
+  AGENT_STATE: 'indiamart_agent_state',
 } as const;
 
 // Legacy aliases for backward compatibility
@@ -21,3 +24,4 @@ export const FILTER_ORDER_VALUE_KEY = STORAGE_KEYS.FILTER_ORDER_VALUE;
 export const SKIPPED_LEADS_KEY = STORAGE_KEYS.SKIPPED_LEADS;
 export const BUY_LEAD_SUSPENSION_KEY = STORAGE_KEYS.BUY_LEAD_SUSPENSION;
 export const DAILY_CONTACT_STATS_KEY = STORAGE_KEYS.DAILY_CONTACT_STATS;
+export const AGENT_STATE = STORAGE_KEYS.AGENT_STATE;

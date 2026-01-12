@@ -1,15 +1,68 @@
-import { defineConfig } from 'vite'
+import { defineConfig, Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import { resolve } from 'path';
-// Fix: Import `fileURLToPath` to define `__dirname` in an ES Module context.
 import { fileURLToPath } from 'url';
+import type { OutputBundle, NormalizedOutputOptions, OutputChunk } from 'rollup';
 
-// Fix: Define `__dirname` which is not available in ES modules by default.
 const __dirname = fileURLToPath(new URL('.', import.meta.url));
+
+// Helper function to strip ES module syntax from code
+function stripEsModuleSyntax(code: string): string {
+  // Remove import statements
+  code = code.replace(/import\s+\{[^}]+\}\s+from\s+["'][^"']+["'];?\n?/g, '');
+  code = code.replace(/import\s+["'][^"']+["'];?\n?/g, '');
+  code = code.replace(/import\s+\*\s+as\s+\w+\s+from\s+["'][^"']+["'];?\n?/g, '');
+  code = code.replace(/import\s+\w+\s+from\s+["'][^"']+["'];?\n?/g, '');
+
+  // Remove export statements (but keep the variable declarations)
+  // Replace "export { ... };" with empty string
+  code = code.replace(/export\s*\{[^}]*\};?\n?/g, '');
+  // Replace "export default ..." - less common in chunks
+  code = code.replace(/export\s+default\s+/g, '');
+  // Replace "export const ..." with "const ..."
+  code = code.replace(/export\s+(const|let|var|function|class)\s+/g, '$1 ');
+
+  return code;
+}
+
+// Custom plugin to bundle content.js dependencies inline
+function inlineContentDeps(): Plugin {
+  return {
+    name: 'inline-content-deps',
+    generateBundle(_options: NormalizedOutputOptions, bundle: OutputBundle) {
+      // Find content.js and its dependencies
+      const contentBundle = bundle['content.js'] as OutputChunk | undefined;
+      if (contentBundle && contentBundle.type === 'chunk') {
+        // Get all imported modules
+        const imports = contentBundle.imports || [];
+        let inlinedCode = '';
+
+        // Inline each import
+        for (const importPath of imports) {
+          const importBundle = bundle[importPath] as OutputChunk | undefined;
+          if (importBundle && importBundle.type === 'chunk') {
+            // Strip ES module syntax from the imported chunk
+            const cleanedCode = stripEsModuleSyntax(importBundle.code);
+            inlinedCode += cleanedCode + '\n';
+          }
+        }
+
+        // Replace imports with inlined code in content.js
+        if (inlinedCode) {
+          let code = contentBundle.code;
+          // Strip ES module syntax from content.js itself
+          code = stripEsModuleSyntax(code);
+          contentBundle.code = inlinedCode + code;
+          contentBundle.imports = [];
+        }
+      }
+    }
+  };
+}
 
 // https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), inlineContentDeps()],
   build: {
     outDir: 'dist',
     rollupOptions: {
@@ -21,33 +74,20 @@ export default defineConfig({
       preserveEntrySignatures: false,
       output: {
         entryFileNames: (chunkInfo) => {
-            // Keep background and content script names static for the manifest
-            if (chunkInfo.name === 'background' || chunkInfo.name === 'content') {
-                return '[name].js';
-            }
-            // Use default hashed names for other assets
-            return 'assets/[name]-[hash].js';
-        },
-        // Use ES modules (service workers support ES modules in Manifest V3)
-        format: 'es',
-        // Ensure chunks are properly named for extension compatibility
-        chunkFileNames: 'assets/[name]-[hash].js',
-        // Force all shared dependencies into separate chunks
-        manualChunks: (id) => {
-          // Don't split node_modules - bundle everything together for extension scripts
-          if (id.includes('node_modules')) {
-            return 'vendor';
+          if (chunkInfo.name === 'background' || chunkInfo.name === 'content') {
+            return '[name].js';
           }
+          return 'assets/[name]-[hash].js';
         },
+        chunkFileNames: 'assets/[name]-[hash].js',
+        format: 'es',
+        manualChunks: undefined,
       }
     },
-    // Set to false to disable minification for easier debugging and to prevent variable name collisions
     minify: false,
-    // Ensure common chunks are shared properly
     commonjsOptions: {
       include: [/node_modules/],
     },
   },
-  // This ensures files in the public directory are copied to the dist folder
   publicDir: 'public',
 })

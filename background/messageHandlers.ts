@@ -13,6 +13,7 @@ import {
   setDailyStatsCache,
   persistSuspensionState,
   clearSuspensionState,
+  persistAutoContactState,
 } from './stateManager';
 import { MESSAGE_TYPES } from '../constants/messages';
 import { TARGET_URL } from '../constants';
@@ -63,6 +64,7 @@ export const handleStartAgent = (
     autoContactState.stopped = false;
     autoContactState.enabled = true;
     autoContactState.statistics.sessionStartTime = Date.now();
+    persistAutoContactState();
     setAgentActive(false);
     setLatestLeadsPayload(null);
 
@@ -123,6 +125,7 @@ export const handleEnableAutoContact = (
   autoContactState.enabled = true;
   autoContactState.stopped = false;
   autoContactState.statistics.sessionStartTime = Date.now();
+  persistAutoContactState();
 
   queryIndiaMARTTabs().then((tabs) => {
     tabs.forEach((tab) => {
@@ -143,6 +146,7 @@ export const handleDisableAutoContact = (
 ): boolean => {
   autoContactState.enabled = false;
   autoContactState.stopped = false;
+  persistAutoContactState();
 
   queryIndiaMARTTabs().then((tabs) => {
     tabs.forEach((tab) => {
@@ -163,6 +167,7 @@ export const handleStopAgent = (
 ): boolean => {
   autoContactState.enabled = false;
   autoContactState.stopped = true;
+  persistAutoContactState();
   setAgentActive(false);
   setLatestLeadsPayload(null);
 
@@ -219,6 +224,7 @@ export const handleFilteredLeadsData = (
   setAgentActive(true);
   if (typeof message.payload?.autoContactEnabled === 'boolean') {
     autoContactState.enabled = message.payload.autoContactEnabled;
+    persistAutoContactState();
   }
   sendMessageSafe(message);
   return true;

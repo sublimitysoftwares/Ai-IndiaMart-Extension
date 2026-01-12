@@ -19,6 +19,10 @@ const App: React.FC = () => {
   const [showFilterDetails, setShowFilterDetails] = useState(false);
   const [filterCriteria, setFilterCriteria] = useState<FilterCriteria | null>(null);
 
+  // ========== SCRAPE-ONLY MODE: State for passed/rejected leads log ==========
+  const [passedLeadsCount, setPassedLeadsCount] = useState(0);
+  const [rejectedLeadsCount, setRejectedLeadsCount] = useState(0);
+
   // Use custom hooks for state management
   const {
     appState,
@@ -73,7 +77,7 @@ const App: React.FC = () => {
   } = useFilterConfig(filterCriteria, showSettings);
 
   // Storage change listener is handled by useFilterConfig hook
-  
+
   useEffect(() => {
     // Ensure this code runs only within a Chrome extension context
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
@@ -81,17 +85,17 @@ const App: React.FC = () => {
         if (!response || response.success === false) {
           return;
         }
-        
+
         // IMMEDIATE state updates (don't wait for async storage operations)
         // Always update auto-contact state from response first (before any conditional logic)
         if (typeof response.autoContactEnabled === 'boolean') {
           setAutoContactEnabled(response.autoContactEnabled);
         }
-        
+
         // Update agent stopped state immediately
         setAgentStopped(Boolean(response.agentStopped));
         agentStoppedRef.current = Boolean(response.agentStopped);
-        
+
         if (response.dailyStats) {
           setDailyStats(response.dailyStats);
         }
@@ -109,7 +113,7 @@ const App: React.FC = () => {
           // Agent is stopped - update UI immediately, load data in background
           setAppState(AppState.Idle);
           setAgentInitialized(true);
-          
+
           // Load persisted data from storage (non-blocking)
           if (typeof chrome !== 'undefined' && chrome.storage) {
             chrome.storage.local.get(['indiamart_leads_cache', 'indiamart_filtered_leads_cache', 'indiamart_contacted_leads_cache'], (result) => {
@@ -140,14 +144,14 @@ const App: React.FC = () => {
           // Agent is active with leads payload - update everything immediately
           const allLeads = response.leadsPayload.allLeads || [];
           const filteredLeadsData = response.leadsPayload.filteredLeads || [];
-          
+
           setLeads(allLeads);
           setFilteredLeads(filteredLeadsData);
           setAgentInitialized(true);
-          
+
           // Update app state immediately based on auto-contact status
           setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.LeadsScraped);
-          
+
           // Persist leads to storage (non-blocking)
           if (typeof chrome !== 'undefined' && chrome.storage) {
             chrome.storage.local.set({
@@ -155,7 +159,7 @@ const App: React.FC = () => {
               'indiamart_filtered_leads_cache': filteredLeadsData,
             });
           }
-          
+
           if (response.leadsPayload?.filters) {
             setFilterCriteria(response.leadsPayload.filters);
           }
@@ -178,7 +182,7 @@ const App: React.FC = () => {
           // Agent is active but no leads payload yet - show loading or auto-contact state
           setAgentInitialized(true);
           setAppState(response.autoContactEnabled ? AppState.AutoContact : AppState.Loading);
-          
+
           // Try to load persisted data in background
           if (typeof chrome !== 'undefined' && chrome.storage) {
             chrome.storage.local.get(['indiamart_leads_cache', 'indiamart_filtered_leads_cache', 'indiamart_contacted_leads_cache'], (result) => {
@@ -201,11 +205,11 @@ const App: React.FC = () => {
           // Agent not active - try to load persisted data but update UI immediately
           const hasAutoContact = response.autoContactEnabled;
           setAgentInitialized(false);
-          
+
           // Update app state immediately based on whether we might have cached data
           // We'll check storage but don't wait for it
           setAppState(hasAutoContact ? AppState.AutoContact : AppState.Idle);
-          
+
           // Try to load persisted data if agent is not active (non-blocking)
           if (typeof chrome !== 'undefined' && chrome.storage) {
             chrome.storage.local.get(['indiamart_leads_cache', 'indiamart_filtered_leads_cache', 'indiamart_contacted_leads_cache'], (result) => {
@@ -252,8 +256,8 @@ const App: React.FC = () => {
             setLeads(message.payload.allLeads || []);
             setFilteredLeads(message.payload.filteredLeads || []);
             // Always update auto-contact state from payload if provided, otherwise keep current state
-            const autoContactFlag = typeof message.payload.autoContactEnabled === 'boolean' 
-              ? message.payload.autoContactEnabled 
+            const autoContactFlag = typeof message.payload.autoContactEnabled === 'boolean'
+              ? message.payload.autoContactEnabled
               : Boolean(message.payload.autoContactEnabled ?? autoContactEnabled);
             setAutoContactEnabled(autoContactFlag);
             setAppState(autoContactFlag ? AppState.AutoContact : AppState.LeadsScraped);
@@ -314,21 +318,21 @@ const App: React.FC = () => {
             });
           }
         } else if (message.type === 'SCRAPING_ERROR') {
-            setError(message.error);
-            setAppState(AppState.Error);
-            setAgentInitialized(false);
+          setError(message.error);
+          setAppState(AppState.Error);
+          setAgentInitialized(false);
         } else if (message.type === 'AGENT_READY') {
-            setAgentInitialized(true);
-            setAgentStopped(false);
-            agentStoppedRef.current = false;
+          setAgentInitialized(true);
+          setAgentStopped(false);
+          agentStoppedRef.current = false;
         } else if (message.type === 'STOP_AGENT') {
-            setAgentInitialized(false);
-            setAgentStopped(true);
-            setAutoContactEnabled(false);
-            setAppState(AppState.Idle);
-            setLeads([]);
-            setFilteredLeads([]);
-            agentStoppedRef.current = true;
+          setAgentInitialized(false);
+          setAgentStopped(true);
+          setAutoContactEnabled(false);
+          setAppState(AppState.Idle);
+          setLeads([]);
+          setFilteredLeads([]);
+          agentStoppedRef.current = true;
         } else if (message.type === 'DAILY_CONTACT_STATS') {
           if (message.payload) {
             setDailyStats(message.payload);
@@ -365,7 +369,7 @@ const App: React.FC = () => {
       return () => {
         // Check again in case the context is lost during cleanup
         if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
-           chrome.runtime.onMessage.removeListener(messageListener);
+          chrome.runtime.onMessage.removeListener(messageListener);
         }
         if (backoffTimerRef.current) {
           window.clearTimeout(backoffTimerRef.current);
@@ -373,11 +377,65 @@ const App: React.FC = () => {
         }
       };
     } else {
-        // This handles cases where the popup is opened in a non-extension context (e.g., local development server)
-        setError("This application must be run as a Chrome extension.");
-        setAppState(AppState.Error);
+      // This handles cases where the popup is opened in a non-extension context (e.g., local development server)
+      setError("This application must be run as a Chrome extension.");
+      setAppState(AppState.Error);
     }
   }, []);
+
+  // ========== SCRAPE-ONLY MODE: Load passed/rejected leads count and handlers ==========
+  useEffect(() => {
+    const loadLeadsCounts = () => {
+      if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+        chrome.storage.local.get(['indiamart_passed_leads_log', 'indiamart_rejected_leads_log'], (result) => {
+          setPassedLeadsCount((result['indiamart_passed_leads_log'] || []).length);
+          setRejectedLeadsCount((result['indiamart_rejected_leads_log'] || []).length);
+        });
+      }
+    };
+    loadLeadsCounts();
+    const interval = setInterval(loadLeadsCounts, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const handleExportPassedLeads = () => {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.get('indiamart_passed_leads_log', (result) => {
+        const logs = result['indiamart_passed_leads_log'] || [];
+        const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `passed_leads_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+      });
+    }
+  };
+
+  const handleClearPassedLeads = () => {
+    if (confirm('Clear all passed leads logs?')) {
+      chrome.storage.local.remove('indiamart_passed_leads_log', () => setPassedLeadsCount(0));
+    }
+  };
+
+  const handleExportRejectedLeads = () => {
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      chrome.storage.local.get('indiamart_rejected_leads_log', (result) => {
+        const logs = result['indiamart_rejected_leads_log'] || [];
+        const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `rejected_leads_${new Date().toISOString().slice(0, 10)}.json`;
+        a.click();
+      });
+    }
+  };
+
+  const handleClearRejectedLeads = () => {
+    if (confirm('Clear all rejected leads logs?')) {
+      chrome.storage.local.remove('indiamart_rejected_leads_log', () => setRejectedLeadsCount(0));
+    }
+  };
+  // ========== END SCRAPE-ONLY MODE ==========
 
   // Handler functions are provided by hooks (useAgentState and useFilterConfig)
 
@@ -394,44 +452,44 @@ const App: React.FC = () => {
         return (
           <div>
             <div className="p-4 bg-slate-800/50 sticky top-0 backdrop-blur-sm z-10 border-b border-slate-700">
-               <h2 className="text-lg font-bold text-white text-center">Found {leads.length} Leads</h2>
-               
-               <AgentControls
-                 autoContactEnabled={autoContactEnabled}
-                 agentStopped={agentStopped}
-                 filteredLeadsCount={filteredLeads.length}
-                 stats={autoContactStats}
-                 dailyStats={dailyStats}
-                 backoffNotice={backoffNotice}
-                 onToggleAutoContact={handleToggleAutoContact}
-                 onStopAgent={handleStopAgent}
-                 onDismissBackoff={() => {
-                   setBackoffNotice(null);
-                   if (backoffTimerRef.current) {
-                     window.clearTimeout(backoffTimerRef.current);
-                     backoffTimerRef.current = null;
-                   }
-                 }}
-               />
-               
-               <FilterDetails
-                 filterCriteria={filterCriteria}
-                 cycleSummary={cycleSummary}
-                 showFilterDetails={showFilterDetails}
-                 onToggle={() => setShowFilterDetails(!showFilterDetails)}
-               />
-               
-               <div className="mt-3">
-                 <label className="block text-sm text-slate-300 mb-1">Sort by</label>
-                 <select
-                   value={sortBy}
-                   onChange={(e) => setSortBy(e.target.value as 'time' | 'company')}
-                   className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                 >
-                   <option value="time">Time (newest first)</option>
-                   <option value="company">Company (A–Z)</option>
-                 </select>
-               </div>
+              <h2 className="text-lg font-bold text-white text-center">Found {leads.length} Leads</h2>
+
+              <AgentControls
+                autoContactEnabled={autoContactEnabled}
+                agentStopped={agentStopped}
+                filteredLeadsCount={filteredLeads.length}
+                stats={autoContactStats}
+                dailyStats={dailyStats}
+                backoffNotice={backoffNotice}
+                onToggleAutoContact={handleToggleAutoContact}
+                onStopAgent={handleStopAgent}
+                onDismissBackoff={() => {
+                  setBackoffNotice(null);
+                  if (backoffTimerRef.current) {
+                    window.clearTimeout(backoffTimerRef.current);
+                    backoffTimerRef.current = null;
+                  }
+                }}
+              />
+
+              <FilterDetails
+                filterCriteria={filterCriteria}
+                cycleSummary={cycleSummary}
+                showFilterDetails={showFilterDetails}
+                onToggle={() => setShowFilterDetails(!showFilterDetails)}
+              />
+
+              <div className="mt-3">
+                <label className="block text-sm text-slate-300 mb-1">Sort by</label>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as 'time' | 'company')}
+                  className="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-md px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="time">Time (newest first)</option>
+                  <option value="company">Company (A–Z)</option>
+                </select>
+              </div>
             </div>
             <LeadsList
               leads={sortedLeads}
@@ -446,8 +504,8 @@ const App: React.FC = () => {
             <h3 className="text-lg font-semibold text-red-400">An Error Occurred</h3>
             <p className="text-slate-300 mt-2">{error}</p>
             <button
-                onClick={handleStartAgent}
-                className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 focus:ring-indigo-500"
+              onClick={handleStartAgent}
+              className="mt-4 bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded-lg focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-slate-900 focus:ring-indigo-500"
             >
               Try Again
             </button>
@@ -489,12 +547,42 @@ const App: React.FC = () => {
             Stop Agent
           </button>
         </div>
-        <div className="mt-2 flex items-center gap-2">
+        <div className="mt-2 flex items-center gap-2 flex-wrap">
           <button
             onClick={() => setShowSettings((v) => !v)}
             className="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-700 text-white rounded-md"
           >
             {showSettings ? 'Hide Settings' : 'Settings'}
+          </button>
+          {/* ========== SCRAPE-ONLY MODE: Export/Clear buttons ========== */}
+          <button
+            onClick={handleExportPassedLeads}
+            disabled={passedLeadsCount === 0}
+            className="px-3 py-1 text-xs bg-green-600 hover:bg-green-700 disabled:bg-gray-500 disabled:cursor-not-allowed text-white rounded-md"
+          >
+            Export Logs ({passedLeadsCount})
+          </button>
+          <button
+            onClick={handleClearPassedLeads}
+            disabled={passedLeadsCount === 0}
+            className="px-3 py-1 text-xs bg-orange-600 hover:bg-orange-700 disabled:bg-gray-500 disabled:cursor-not-allowed text-white rounded-md"
+          >
+            Clear Logs
+          </button>
+          <div className="w-full h-1"></div> {/* Spacer for new row if wrapping */}
+          <button
+            onClick={handleExportRejectedLeads}
+            disabled={rejectedLeadsCount === 0}
+            className="px-3 py-1 text-xs bg-red-600 hover:bg-red-700 disabled:bg-gray-500 disabled:cursor-not-allowed text-white rounded-md"
+          >
+            Export Rejected ({rejectedLeadsCount})
+          </button>
+          <button
+            onClick={handleClearRejectedLeads}
+            disabled={rejectedLeadsCount === 0}
+            className="px-3 py-1 text-xs bg-orange-600 hover:bg-orange-700 disabled:bg-gray-500 disabled:cursor-not-allowed text-white rounded-md"
+          >
+            Clear Rejected
           </button>
         </div>
       </header>
