@@ -19,7 +19,9 @@ export const DEFAULT_ENQUIRY_KEYWORDS = DEFAULT_KEYWORDS;
 
 export const DEFAULT_ALLOWED_CATEGORIES = DEFAULT_CATEGORIES;
 
+// Complete list of Indian States (28) and Union Territories (8)
 export const INDIAN_STATES = [
+  // States (28)
   'Andhra Pradesh',
   'Arunachal Pradesh',
   'Assam',
@@ -32,7 +34,6 @@ export const INDIAN_STATES = [
   'Jharkhand',
   'Karnataka',
   'Kerala',
-  'Delhi',
   'Madhya Pradesh',
   'Maharashtra',
   'Manipur',
@@ -48,7 +49,29 @@ export const INDIAN_STATES = [
   'Tripura',
   'Uttar Pradesh',
   'Uttarakhand',
-  'West Bengal'
+  'West Bengal',
+  // Union Territories (8) with alternate spellings
+  'Andaman and Nicobar Islands',
+  'Andaman & Nicobar Islands',
+  'Andaman and Nicobar',
+  'Andaman & Nicobar',
+  'Chandigarh',
+  'Dadra and Nagar Haveli and Daman and Diu',
+  'Dadra & Nagar Haveli & Daman & Diu',
+  'Dadra and Nagar Haveli',
+  'Dadra & Nagar Haveli',
+  'Daman and Diu',
+  'Daman & Diu',
+  'Delhi',
+  'New Delhi',
+  'NCR Delhi',
+  'Jammu and Kashmir',
+  'Jammu & Kashmir',
+  'J&K',
+  'Ladakh',
+  'Lakshadweep',
+  'Puducherry',
+  'Pondicherry'
 ];
 
 export const DEFAULT_QUANTITY_THRESHOLD = { min: 20, unit: 'piece' as const };

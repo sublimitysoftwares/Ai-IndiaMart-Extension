@@ -25,24 +25,32 @@ export const useFilterConfig = (filterCriteria: FilterCriteria | null, showSetti
         STORAGE_KEYS.FILTER_ORDER_VALUE
       ]);
 
-      // Load keywords - prioritize storage, fallback to filterCriteria, then defaults
-      if (Array.isArray(result[STORAGE_KEYS.FILTER_KEYWORDS]) && result[STORAGE_KEYS.FILTER_KEYWORDS].length > 0) {
+      // Load keywords - allow empty arrays (user may have cleared the list intentionally)
+      if (Array.isArray(result[STORAGE_KEYS.FILTER_KEYWORDS])) {
+        // Storage has an array (even if empty) - use it
         setKeywords(result[STORAGE_KEYS.FILTER_KEYWORDS]);
-      } else if (filterCriteria?.keywords && filterCriteria.keywords.length > 0) {
-        setKeywords(filterCriteria.keywords);
-      } else {
-        setKeywords(DEFAULT_KEYWORDS);
-        await setStorage({ [STORAGE_KEYS.FILTER_KEYWORDS]: DEFAULT_KEYWORDS });
+      } else if (result[STORAGE_KEYS.FILTER_KEYWORDS] === undefined) {
+        // Key doesn't exist in storage - use defaults for first-time initialization
+        if (filterCriteria?.keywords && filterCriteria.keywords.length > 0) {
+          setKeywords(filterCriteria.keywords);
+        } else {
+          setKeywords(DEFAULT_KEYWORDS);
+          await setStorage({ [STORAGE_KEYS.FILTER_KEYWORDS]: DEFAULT_KEYWORDS });
+        }
       }
 
-      // Load categories
-      if (Array.isArray(result[STORAGE_KEYS.FILTER_CATEGORIES]) && result[STORAGE_KEYS.FILTER_CATEGORIES].length > 0) {
+      // Load categories - allow empty arrays (user may have cleared the list intentionally)
+      if (Array.isArray(result[STORAGE_KEYS.FILTER_CATEGORIES])) {
+        // Storage has an array (even if empty) - use it
         setCategories(result[STORAGE_KEYS.FILTER_CATEGORIES]);
-      } else if (filterCriteria?.categories && filterCriteria.categories.length > 0) {
-        setCategories(filterCriteria.categories);
-      } else {
-        setCategories(DEFAULT_CATEGORIES);
-        await setStorage({ [STORAGE_KEYS.FILTER_CATEGORIES]: DEFAULT_CATEGORIES });
+      } else if (result[STORAGE_KEYS.FILTER_CATEGORIES] === undefined) {
+        // Key doesn't exist in storage - use defaults for first-time initialization
+        if (filterCriteria?.categories && filterCriteria.categories.length > 0) {
+          setCategories(filterCriteria.categories);
+        } else {
+          setCategories(DEFAULT_CATEGORIES);
+          await setStorage({ [STORAGE_KEYS.FILTER_CATEGORIES]: DEFAULT_CATEGORIES });
+        }
       }
 
       // Load quantity threshold
@@ -285,9 +293,9 @@ export const useFilterConfig = (filterCriteria: FilterCriteria | null, showSetti
       const importedQuantity: { min: number; unit: string } | undefined =
         config.quantity && typeof config.quantity === 'object' && typeof config.quantity.min === 'number' && typeof config.quantity.unit === 'string'
           ? {
-              min: Math.max(1, Math.min(config.quantity.min, 1000000)),
-              unit: config.quantity.unit.trim().toLowerCase() || 'piece'
-            }
+            min: Math.max(1, Math.min(config.quantity.min, 1000000)),
+            unit: config.quantity.unit.trim().toLowerCase() || 'piece'
+          }
           : undefined;
 
       const importedOrderValue: number | undefined =

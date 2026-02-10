@@ -115,6 +115,7 @@ import {
   let filterConfigLoaded = false; // Track if filter config has been loaded from storage
   let skippedLeads = new Set<string>(); // In-memory set of skipped lead IDs for fast lookups
   let backoffUntil = 0;
+  let idlePopupCheckInterval: ReturnType<typeof setInterval> | null = null; // For idle popup watcher
   const recentErrors: number[] = [];
 
   const stopAutomationTimers = (): void => {
@@ -129,6 +130,11 @@ import {
     if (initialScrapeInterval) {
       clearInterval(initialScrapeInterval);
       initialScrapeInterval = null;
+    }
+    // Stop idle popup watcher
+    if (idlePopupCheckInterval) {
+      clearInterval(idlePopupCheckInterval);
+      idlePopupCheckInterval = null;
     }
     // Stop zero balance observer
     if (zeroBalanceObserver) {
@@ -2117,29 +2123,30 @@ import {
       return { passed: false, reason: 'Filter config not loaded', nextContactDelayMinutes: 0 };
     }
 
-
     // Note: We're using the runtime arrays (enquiryKeywords, allowedCategories) which are updated from storage
     // These arrays are NOT the hardcoded DEFAULT arrays - they're mutable variables that get updated
 
-    // Filter 1: Enquiry Title Keywords (universal uniform check + keyword list)
-    const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
+    // Check if lists are empty
+    const keywordListEmpty = enquiryKeywords.length === 0;
+    const categoryListEmpty = allowedCategories.length === 0;
 
-    // Primary check: Universal uniform keywords (passes immediately if found)
-    const uniformPatterns = [
-      /\buniform\b/,
-      /\buniforms\b/,
-      /\buniform\s+fabric\b/,
-      /\buniform\s+fabrics\b/,
-      /\buniform-fabric\b/,
-      /\buniform_fabric\b/
-    ];
-    const hasUniformKeyword = uniformPatterns.some(pattern => pattern.test(titleLower));
+    // If BOTH keyword and category lists are empty, skip ALL filtering entirely
+    // All leads pass without any checks (state, quantity, order value are also skipped)
+    if (keywordListEmpty && categoryListEmpty) {
+      // Generate random delay between 1-10 minutes for leads
+      const delayOptions = [1, 5, 10];
+      const randomDelay = delayOptions[Math.floor(Math.random() * delayOptions.length)];
+      return { passed: true, reason: 'No filters configured - all leads pass', nextContactDelayMinutes: randomDelay };
+    }
 
-    // Fallback check: Keyword list (only if uniform not found)
-    const hasKeyword = hasUniformKeyword || enquiryKeywords.some(keyword => titleLower.includes(keyword));
+    // Filter 1: Enquiry Title Keywords (only if keyword list has data)
+    if (!keywordListEmpty) {
+      const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
+      const hasKeywordFromList = enquiryKeywords.some(keyword => titleLower.includes(keyword.toLowerCase()));
 
-    if (!hasKeyword) {
-      return { passed: false, reason: 'No uniform keywords found', nextContactDelayMinutes: 0 };
+      if (!hasKeywordFromList) {
+        return { passed: false, reason: 'No matching keywords found in title', nextContactDelayMinutes: 0 };
+      }
     }
 
     // Filter 2: State validation - check if state is in Indian states list
@@ -2164,21 +2171,13 @@ import {
     }
 
     // Filter 3: Quantity ≥ threshold (flexible - check number first, unit match optional)
-
-    // Special handling: If title contains "coat", use lower quantity threshold (10 pieces)
-    const hasCoatKeyword = titleLower.includes('coat');
-    const effectiveQuantityThreshold = hasCoatKeyword ? 10 : quantityThreshold.min;
-
-    if (hasCoatKeyword) {
-    }
-
     // First check: quantity number must meet threshold
-    const quantityMeetsThreshold = typeof lead.quantity === 'number' && lead.quantity >= effectiveQuantityThreshold;
+    const quantityMeetsThreshold = typeof lead.quantity === 'number' && lead.quantity >= quantityThreshold.min;
 
     if (!quantityMeetsThreshold) {
       return {
         passed: false,
-        reason: `Quantity must be ≥ ${effectiveQuantityThreshold} ${quantityThreshold.unit.charAt(0).toUpperCase()}${quantityThreshold.unit.slice(1)}`,
+        reason: `Quantity must be ≥ ${quantityThreshold.min} ${quantityThreshold.unit.charAt(0).toUpperCase()}${quantityThreshold.unit.slice(1)}`,
         nextContactDelayMinutes: 0
       };
     }
@@ -2193,29 +2192,24 @@ import {
       }
     }
 
-    // Filter 4: Category match
-    const categoryLower = (lead.category || '').toLowerCase();
+    // Filter 4: Category match (only if category list has data)
+    if (!categoryListEmpty) {
+      const categoryLower = (lead.category || '').toLowerCase();
 
-    // First check: automatically pass if category contains "uniform" or "uniform fabric"
-    const uniformKeywords = ['uniform', 'uniform fabric', 'uniforms', 'uniform-fabric', 'uniform_fabric'];
-    const categoryHasUniform = uniformKeywords.some(keyword => categoryLower.includes(keyword));
+      const hasCategory = allowedCategories.some((keyword) => {
+        const normalized = keyword.toLowerCase();
+        return categoryLower.includes(normalized) || normalized.includes(categoryLower);
+      });
 
-    // Second check: fall back to allowedCategories list if no uniform keyword found
-    const hasCategory = categoryHasUniform || allowedCategories.some((keyword) => {
-      const normalized = keyword.toLowerCase();
-      return categoryLower.includes(normalized) || normalized.includes(categoryLower);
-    });
-
-    // Only fail if category exists but doesn't match either condition
-    if (!hasCategory && lead.category) {
-      return { passed: false, reason: 'Category not in allowed list', nextContactDelayMinutes: 0 };
+      // Only fail if category exists but doesn't match
+      if (!hasCategory && lead.category) {
+        return { passed: false, reason: 'Category not in allowed list', nextContactDelayMinutes: 0 };
+      }
     }
-    if (!lead.category) {
-    } else {
-    }
+    // If both lists are empty OR category list is empty, we skip category check
 
-    // Filter 5: Probable Order Value ≥ ₹10,000
-    const orderValue = lead.probableOrderValueMin || lead.probableOrderValueMax || 0;
+    // Filter 5: Probable Order Value ≥ threshold (use max value for ranges like "₹3,000 to ₹10,000")
+    const orderValue = lead.probableOrderValueMax || lead.probableOrderValueMin || 0;
     if (orderValue < orderValueMin) {
       return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
     }
@@ -2417,6 +2411,19 @@ import {
 
     if (!filterConfigLoaded) {
       lastProcessingTime = Date.now();
+      return;
+    }
+
+    // If both keyword and category lists are empty, stop processing entirely
+    // The extension should not scrape when no filters are configured
+    if (enquiryKeywords.length === 0 && allowedCategories.length === 0) {
+      console.log('[Content] Both keyword and category lists are empty - stopping agent');
+      lastProcessingTime = Date.now();
+      // Notify popup that agent is stopping due to no filters
+      chrome.runtime?.sendMessage?.({
+        type: 'AGENT_STOPPED_NO_FILTERS',
+        reason: 'No keywords or categories configured. Please add at least one keyword or category to start scraping.'
+      });
       return;
     }
 
@@ -2858,6 +2865,120 @@ import {
     console.log('[Content] startScrapeLoop - Interval started');
   };
 
+  // ========== IDLE POPUP AUTO-CLICK HANDLER ==========
+  // IndiaMART shows a popup "You've been inactive for a while!" with "Get Fresh Leads" button
+  // Button HTML: <button id="Yes" class="send_quo ys_quo w_1" onclick="getFreshLeads();">Get Fresh Leads</button>
+  // This auto-clicks that button to prevent the extension from getting stuck
+
+  const clickGetFreshLeadsButton = (): boolean => {
+    // Try multiple selectors to find the button
+    const selectors = [
+      'button#Yes',                          // By ID
+      '#Yes',                                // Just ID
+      'button.send_quo.ys_quo',              // By classes
+      '.send_quo.ys_quo',                    // Just classes
+      'button[onclick*="getFreshLeads"]',    // By onclick attribute
+      '.sm_inn_pop_n button',                // Button inside popup container
+      '.act_btns button'                     // Button inside action buttons div
+    ];
+
+    for (const selector of selectors) {
+      const button = document.querySelector(selector) as HTMLElement;
+      if (button && button.textContent?.includes('Fresh Leads')) {
+        console.log(`[Content] IDLE POPUP: Found button with selector "${selector}" - CLICKING NOW`);
+
+        // Method 1: Direct click
+        try {
+          button.click();
+          console.log('[Content] IDLE POPUP: Click method 1 (direct click) executed');
+        } catch (e) {
+          console.error('[Content] IDLE POPUP: Direct click failed:', e);
+        }
+
+        // Method 2: Dispatch native click event
+        try {
+          const clickEvent = new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            view: window
+          });
+          button.dispatchEvent(clickEvent);
+          console.log('[Content] IDLE POPUP: Click method 2 (dispatchEvent) executed');
+        } catch (e) {
+          console.error('[Content] IDLE POPUP: dispatchEvent failed:', e);
+        }
+
+        // Method 3: Focus and enter key
+        try {
+          button.focus();
+          const enterEvent = new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true });
+          button.dispatchEvent(enterEvent);
+          console.log('[Content] IDLE POPUP: Click method 3 (focus+enter) executed');
+        } catch (e) {
+          console.error('[Content] IDLE POPUP: focus+enter failed:', e);
+        }
+
+        // Method 4: Call onclick directly
+        try {
+          const btn = button as HTMLButtonElement;
+          if (btn.onclick) {
+            btn.onclick.call(btn, new PointerEvent('click'));
+            console.log('[Content] IDLE POPUP: Click method 4 (onclick) executed');
+          }
+        } catch (e) {
+          console.error('[Content] IDLE POPUP: onclick failed:', e);
+        }
+
+        // Method 5: Try to call window.getFreshLeads() directly
+        try {
+          if (typeof (window as any).getFreshLeads === 'function') {
+            (window as any).getFreshLeads();
+            console.log('[Content] IDLE POPUP: Click method 5 (window.getFreshLeads) executed');
+          }
+        } catch (e) {
+          console.error('[Content] IDLE POPUP: window.getFreshLeads failed:', e);
+        }
+
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  // Use a separate variable so it's never stopped by stopAutomationTimers
+  let _idlePopupInterval: ReturnType<typeof setInterval> | null = null;
+
+  const startIdlePopupWatcher = () => {
+    // Clear any existing interval
+    if (_idlePopupInterval) {
+      clearInterval(_idlePopupInterval);
+    }
+
+    console.log('[Content] IDLE POPUP WATCHER: Starting (will check every 2 seconds)');
+
+    // Check every 2 seconds for the "Get Fresh Leads" button
+    _idlePopupInterval = setInterval(() => {
+      // Log every check to verify it's running
+      const found = clickGetFreshLeadsButton();
+      if (found) {
+        console.log('[Content] IDLE POPUP WATCHER: Button was found and clicked!');
+      }
+    }, 2000); // 2 seconds - very aggressive
+
+    // Do an immediate check
+    clickGetFreshLeadsButton();
+  };
+
+  const stopIdlePopupWatcher = () => {
+    if (_idlePopupInterval) {
+      clearInterval(_idlePopupInterval);
+      _idlePopupInterval = null;
+      console.log('[Content] IDLE POPUP WATCHER: Stopped');
+    }
+  };
+  // ========== END IDLE POPUP AUTO-CLICK HANDLER ==========
+
   // Listen for storage changes to reload filter config automatically
   if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.onChanged) {
     chrome.storage.onChanged.addListener((changes, areaName) => {
@@ -2881,10 +3002,12 @@ import {
   void Promise.all([loadFilterConfig(), loadSkippedLeads(), loadDailyContactStats(), loadContactHistory()])
     .then(() => {
       startZeroBalanceObserver();
+      startIdlePopupWatcher(); // Start watching for idle popup
       syncAutoContactState();
     })
     .catch((error) => {
       startZeroBalanceObserver();
+      startIdlePopupWatcher(); // Start watching for idle popup even on error
       syncAutoContactState();
     });
 })(); // End of IIFE
