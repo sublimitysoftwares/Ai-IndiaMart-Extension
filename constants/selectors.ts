@@ -19,6 +19,14 @@ export const SEND_REPLY_TEXT = 'Send Reply';
 export const SEND_REPLY_SELECTOR = '.btn-latest';
 
 export const SEND_REPLY_BUTTON_SELECTORS = [
+  'button.sendreply.progress-btn-latest',
+  'button.sendreply',
+  'button.progress-btn-latest',
+  '.sendreply .btn-latest',
+  '#sendReplyBtn button',
+  '#sendReplyBtn .btn-latest',
+  'button[id^="buylead"]',
+  '.bl_quote_form button.sendreply',
   '.btnCBNContainer .btnCBN1',
   '.btnCBNContainer [onclick*="sendreply"]',
   '.btnCBNContainer button[data-action*="send"]',

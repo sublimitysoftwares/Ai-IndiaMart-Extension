@@ -1623,78 +1623,94 @@ import {
     }
 
 
-    // COMMENTED OUT: Contact Buyer Now button click flow
-    // // Ensure button is visible and in viewport before clicking
-    // contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    // await delay(500);
-    // 
-    // await clickWithFallback(contactButton, 'Contact Buyer');
+    // Phase 2: Contact Buyer Now button click ENABLED
+    contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await delay(500);
 
-    // Return early since contact button click is disabled
-    return { success: false, error: 'Contact Buyer Now button click is currently disabled.' };
+    // SINGLE CLICK approach — mimic human behavior exactly.
+    // IndiaMart's "Contact Buyer Now" is an <a> tag with both an href AND an onclick handler.
+    // The onclick handler runs IndiaMart's purchase JS (contactbuyernow function).
+    // We need: onclick to fire (purchase) + NO page navigation.
+    // Solution: event.preventDefault() stops browser navigation but lets onclick run.
+    // IMPORTANT: Do NOT remove href — IndiaMart's JS reads it for parameters.
+    // IMPORTANT: Do NOT use clickWithFallback — it clicks 4+ times causing double-purchase.
+    const preventNav = (e: Event) => {
+      e.preventDefault();
+      console.log('[Content] Phase 2: Prevented <a> tag navigation via preventDefault');
+    };
 
-    // COMMENTED OUT: All code below is disabled since contact button click is commented out
-    /* 
-    // Wait for contact form/modal to appear after clicking Contact Buyer Now
-    await delay(1000); // Additional delay for form to load
+    if (contactButton.tagName === 'A') {
+      contactButton.addEventListener('click', preventNav);
+      console.log('[Content] Phase 2: Added preventDefault listener for <a> Contact Buyer button');
+    }
+
+    // Single click — exactly like a human would
+    contactButton.click();
+    console.log('[Content] Phase 2: Clicked Contact Buyer Now button (single click)');
+
+    // Clean up the navigation prevention handler
+    if (contactButton.tagName === 'A') {
+      contactButton.removeEventListener('click', preventNav);
+    }
+
+    // Wait 10 seconds for the reply panel (bl_quote_form) to fully load with pre-filled message
+    console.log('[Content] Phase 2: Waiting 10s for reply panel to load after Contact Buyer Now click...');
+    await delay(10000);
 
     // Check for "already purchased" dialog first
     const alreadyPurchasedDialog = detectAlreadyPurchasedDialog();
     if (alreadyPurchasedDialog.detected) {
-      
-      // Dismiss the dialog by clicking OK
+
+      // Dismiss the dialog by clicking OK — but DO NOT return early!
+      // IndiaMart shows this dialog for NEWLY purchased leads too (as a confirmation).
+      // We need to dismiss it and continue to the Send Reply step.
       const dismissed = await dismissAlreadyPurchasedDialog();
       if (dismissed) {
-      } else {
+        console.log('[Content] Phase 2: Already purchased dialog dismissed — continuing to reply step');
       }
 
-      // Add to skip list since this lead is already purchased
-      if (lead?.leadId) {
-        await addSkippedLead(lead.leadId);
-      }
-
-      // Return early with specific error
-      return { 
-        success: false, 
-        error: 'This Buy Lead has already been purchased. Lead has been added to skip list.' 
-      };
+      // Wait 5 seconds for the reply panel to become accessible after dialog dismissal
+      console.log('[Content] Phase 2: Waiting 5s after dialog dismissal for reply panel...');
+      await delay(5000);
     }
 
     // Check for expired/consumed lead error modal
     const expiredModal = detectExpiredLeadModal();
     if (expiredModal.detected) {
-      
+
       // Extract leadId and add to skip list
       if (lead?.leadId) {
         await addSkippedLead(lead.leadId);
-      } else {
       }
 
       // Dismiss the modal
       const dismissed = await dismissExpiredLeadModal();
       if (dismissed) {
-      } else {
+        console.log('[Content] Phase 2: Expired lead modal dismissed');
       }
 
       // Return early with specific error
-      return { 
-        success: false, 
-        error: 'Lead expired or already consumed by maximum permissible sellers. Lead has been added to skip list.' 
+      return {
+        success: false,
+        error: 'Lead expired or already consumed by maximum permissible sellers. Lead has been added to skip list.'
       };
     }
 
-    // Attempt to fill the message while the form loads
-    const desiredMessage = composeContactMessage(lead);
-    let messageFilled = fillContactMessage(desiredMessage);
-    if (messageFilled) {
-    }
+    // COMMENTED OUT: Using IndiaMart's default pre-filled message instead of custom message
+    // const desiredMessage = composeContactMessage(lead);
+    // let messageFilled = fillContactMessage(desiredMessage);
+    // if (messageFilled) {
+    //   console.log('[Content] Phase 2: Message filled successfully');
+    // }
 
     const replyButton = await waitForElement(() => {
-      if (!messageFilled) {
-        messageFilled = fillContactMessage(desiredMessage);
-        if (messageFilled) {
-        }
-      }
+      // COMMENTED OUT: No longer trying to fill custom message
+      // if (!messageFilled) {
+      //   messageFilled = fillContactMessage(desiredMessage);
+      //   if (messageFilled) {
+      //     console.log('[Content] Phase 2: Message filled on retry');
+      //   }
+      // }
 
       const contexts = getInteractionContexts();
       for (const ctx of contexts) {
@@ -1710,7 +1726,7 @@ import {
       if (isElementVisible(fallbackButton)) {
         return fallbackButton;
       }
-      
+
       return null;
     }, 20000);
 
@@ -1721,98 +1737,130 @@ import {
     if (!replyButton) {
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
-    
 
-    if (!messageFilled) {
-      // Try one last time before sending
-      messageFilled = fillContactMessage(desiredMessage);
-      if (!messageFilled) {
+    // COMMENTED OUT: No longer overriding IndiaMart's default message
+    // if (!messageFilled) {
+    //   messageFilled = fillContactMessage(desiredMessage);
+    //   if (!messageFilled) {
+    //     console.log('[Content] Phase 2: Warning - message could not be filled');
+    //   }
+    // }
+    console.log('[Content] Phase 2: Using IndiaMart default message (no custom override)');
+
+    // Phase 2: Send Reply button click ENABLED
+    replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await delay(500); // Wait for scroll
+
+    if (shouldAbort()) {
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
+    await clickWithFallback(replyButton, 'Send Reply');
+
+    // Wait 10 seconds for IndiaMart's confirmation/processing panel to complete the reply submission
+    console.log('[Content] Phase 2: Waiting 10s for Send Reply confirmation panel to process...');
+    await delay(10000);
+
+    // Phase 2: Check for "already purchased" dialog AFTER Reply click
+    // This is the critical check — the dialog often appears only after Reply is clicked
+    const postReplyAlreadyPurchased = detectAlreadyPurchasedDialog();
+    if (postReplyAlreadyPurchased.detected) {
+      console.log('[Content] Phase 2: "Already purchased" dialog detected AFTER Reply click');
+      const dismissed = await dismissAlreadyPurchasedDialog();
+      if (dismissed) {
+        console.log('[Content] Phase 2: Already purchased dialog dismissed');
+      }
+      if (lead?.leadId) {
+        await addSkippedLead(lead.leadId);
+        console.log('[Content] Phase 2: Lead added to skip list:', lead.leadId);
+      }
+      return {
+        success: false,
+        error: 'Already purchased - detected after Reply click. Lead not counted toward daily quota.'
+      };
+    }
+
+    let sendConfirmed = await waitForSendReplyConfirmation(6000);
+
+    if (shouldAbort()) {
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
+    if (!sendConfirmed) {
+      // Check if button is still visible - if not, it might have been clicked successfully
+      const buttonStillVisible = isSendReplyButtonVisible();
+      const messageFieldStillVisible = !!getVisibleMessageField();
+
+      // If both button and message field are gone, check for "already purchased" before assuming success
+      if (!buttonStillVisible && !messageFieldStillVisible) {
+        // Phase 2: One more check — dialog may have caused UI elements to disappear
+        const lateAlreadyPurchased = detectAlreadyPurchasedDialog();
+        if (lateAlreadyPurchased.detected) {
+          console.log('[Content] Phase 2: "Already purchased" dialog caused form to disappear');
+          const dismissed = await dismissAlreadyPurchasedDialog();
+          if (dismissed) {
+            console.log('[Content] Phase 2: Late already-purchased dialog dismissed');
+          }
+          if (lead?.leadId) {
+            await addSkippedLead(lead.leadId);
+          }
+          return {
+            success: false,
+            error: 'Already purchased - detected after form disappeared. Lead not counted toward daily quota.'
+          };
+        }
+        sendConfirmed = true;
+      } else {
+        // Additional check: see if success indicators are present (they might have appeared quickly)
+        await delay(1000); // Wait a bit more for potential success indicators
+        sendConfirmed = await waitForSendReplyConfirmation(2000);
+
+        if (!sendConfirmed && buttonStillVisible) {
+          const retryButton =
+            (replyButton.isConnected && isElementVisible(replyButton)) ?
+              replyButton :
+              await waitForElement(() => {
+                const candidate = findSendReplyButton();
+                return isElementVisible(candidate) ? candidate : null;
+              }, 2000);
+
+          if (retryButton && isSendReplyButtonVisible() && getVisibleMessageField()) {
+            if (shouldAbort()) {
+              return { success: false, error: 'Auto-contact disabled.' };
+            }
+
+            await clickWithFallback(retryButton, 'Send Reply Retry');
+            await delay(1500);
+            sendConfirmed = await waitForSendReplyConfirmation(6000);
+          } else {
+            // If button disappeared, assume it was sent
+            if (!isSendReplyButtonVisible() && !getVisibleMessageField()) {
+              sendConfirmed = true;
+            }
+          }
+        }
       }
     }
 
-    // COMMENTED OUT: Send Reply button click flow
-    // // Ensure button is in view before clicking
-    // replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    // await delay(500); // Wait for scroll
+    if (shouldAbort()) {
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
 
-    // if (shouldAbort()) {
-    //   return { success: false, error: 'Auto-contact disabled.' };
-    // }
+    if (!sendConfirmed) {
+      const messageContent = getMessageFieldContent();
+      const validationError = getSendReplyError();
+      return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
+    }
 
-    // await clickWithFallback(replyButton, 'Send Reply');
-
-    // // Give the site a moment to register the submission
-    // await delay(1200);
-
-    // let sendConfirmed = await waitForSendReplyConfirmation(6000);
-
-    // if (shouldAbort()) {
-    //   return { success: false, error: 'Auto-contact disabled.' };
-    // }
-
-    // if (!sendConfirmed) {
-    //   // Check if button is still visible - if not, it might have been clicked successfully
-    //   const buttonStillVisible = isSendReplyButtonVisible();
-    //   const messageFieldStillVisible = !!getVisibleMessageField();
-    //   
-    //   // If both button and message field are gone, the form might have been submitted
-    //   if (!buttonStillVisible && !messageFieldStillVisible) {
-    //     sendConfirmed = true;
-    //   } else {
-    //     
-    //     // Additional check: see if success indicators are present (they might have appeared quickly)
-    //     await delay(1000); // Wait a bit more for potential success indicators
-    //     sendConfirmed = await waitForSendReplyConfirmation(2000);
-    //     
-    //     if (!sendConfirmed && buttonStillVisible) {
-    //       const retryButton =
-    //         (replyButton.isConnected && isElementVisible(replyButton)) ?
-    //           replyButton :
-    //           await waitForElement(() => {
-    //             const candidate = findSendReplyButton();
-    //             return isElementVisible(candidate) ? candidate : null;
-    //           }, 2000);
-
-    //       if (retryButton && isSendReplyButtonVisible() && getVisibleMessageField()) {
-    //         if (shouldAbort()) {
-    //           return { success: false, error: 'Auto-contact disabled.' };
-    //         }
-
-    //         await clickWithFallback(retryButton, 'Send Reply Retry');
-    //         await delay(1500);
-    //         sendConfirmed = await waitForSendReplyConfirmation(6000);
-    //       } else {
-    //         // If button disappeared, assume it was sent
-    //         if (!isSendReplyButtonVisible() && !getVisibleMessageField()) {
-    //           sendConfirmed = true;
-    //         }
-    //       }
-    //     }
-    //   }
-    // }
-
-    // if (shouldAbort()) {
-    //   return { success: false, error: 'Auto-contact disabled.' };
-    // }
-
-    // if (!sendConfirmed) {
-    //   const messageContent = getMessageFieldContent();
-    //   const validationError = getSendReplyError();
-    //   return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
-    // }
-
-    // Return early since we're not actually clicking the buttons
-    return { success: false, error: 'Contact and Send Reply button clicks are currently disabled.' };
-
-    // COMMENTED OUT: Code below would execute after successful send reply
+    // Contact successful - update history
     const leadDetails = lead || (card ? extractLead(card, cardIndex) : undefined);
     if (leadDetails && leadDetails.leadId) {
       contactedLeadHistory.set(leadDetails.leadId, Date.now());
       purgeStaleContactHistory();
     }
 
+    console.log('[Content] Phase 2: Contact flow completed successfully for lead:', lead?.leadId);
     return { success: true };
-    */
   };
 
   // Removed duplicate startScrapeLoop - defined later in the file
@@ -1834,9 +1882,9 @@ import {
 
   // Validation and date utilities imported from utils/
 
-  const determineDailyLimit = (dayOfWeek: number): number => {
-    // Sunday (0) => 6-8, Monday-Saturday => 14-18
-    return dayOfWeek === 0 ? randomIntBetween(6, 8) : randomIntBetween(14, 18);
+  const determineDailyLimit = (_dayOfWeek: number): number => {
+    // Phase 2: Max 2 contacts per day
+    return 2;
   };
 
   const initializeDailyStats = (): DailyContactStats => {
@@ -2519,18 +2567,30 @@ import {
           filteredLeads.push(lead);
           filteredLeadsCount = filteredLeads.length;
 
-          // ========== SCRAPE-ONLY MODE: Store lead instead of contacting ==========
-          // Store the passed lead for later export (no contact flow)
+          // Phase 2: Click "Contact Buyer Now" if daily limit not yet reached
+          if (canContactMoreToday()) {
+            console.log('[Content] Phase 2: Daily limit not reached, attempting contact for:', lead.leadId, lead.companyName);
+            const contactResult = await performContactFlow(lead.cardIndex ?? index, lead);
+            if (contactResult.success) {
+              await incrementDailyContactCount();
+              cycleActions.push(`Phase 2 CONTACTED: ${lead.companyName || lead.leadId}`);
+              console.log('[Content] Phase 2: Contact successful for lead:', lead.leadId, '| Daily count:', dailyContactStats?.count, '/', dailyContactStats?.limit);
+            } else {
+              console.log('[Content] Phase 2: Contact failed:', contactResult.error);
+              cycleActions.push(`Phase 2 contact failed: ${contactResult.error}`);
+            }
+          }
+
+          // Always store the passed lead (contacted or not) so user can track it
           await storePassedLead(lead, filterResult.reason);
           cycleActions.push(`Stored passed lead: ${lead.companyName || lead.leadId}`);
-          console.log('[Content] SCRAPE-ONLY: Stored passed lead:', lead.leadId, lead.companyName);
+          console.log('[Content] Stored passed lead:', lead.leadId, lead.companyName);
 
           // Mark as processed so we don't process again
           processedLeads.add(lead.leadId);
 
           // Small delay between processing leads
           await delay(randomBetween(500, 1500));
-          // ========== END SCRAPE-ONLY MODE ==========
         } else {
           // ========== SCRAPE-ONLY MODE: Store rejected lead with reason ==========
           await storeRejectedLead(lead, filterResult.reason);
