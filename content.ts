@@ -192,10 +192,11 @@ import {
     filterReason: string;
     timestamp: number;
     dateString: string;
+    status?: string; // e.g., 'CONTACTED', 'FAILED', 'SKIPPED_LIMIT'
   }
 
   // Store a lead that passed filter criteria to chrome.storage
-  const storePassedLead = async (lead: Lead, filterReason: string): Promise<void> => {
+  const storePassedLead = async (lead: Lead, filterReason: string, status?: string): Promise<void> => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) {
       console.log('[Content] storePassedLead - chrome.storage not available');
       return;
@@ -206,6 +207,7 @@ import {
       filterReason,
       timestamp: Date.now(),
       dateString: new Date().toISOString(),
+      status: status || 'UNKNOWN'
     };
 
     try {
@@ -214,9 +216,17 @@ import {
       const existingLogs: PassedLeadLog[] = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
 
       // Check if lead already exists (by leadId)
-      const alreadyExists = existingLogs.some(entry => entry.lead.leadId === lead.leadId);
-      if (alreadyExists) {
-        console.log('[Content] storePassedLead - Lead already logged:', lead.leadId);
+      const existingIndex = existingLogs.findIndex(entry => entry.lead.leadId === lead.leadId);
+
+      if (existingIndex !== -1) {
+        // If it exists but we have a new status (e.g. was UNKNOWN, now CONTACTED), update it
+        if (status && existingLogs[existingIndex].status !== status) {
+          existingLogs[existingIndex].status = status;
+          await chrome.storage.local.set({ [STORAGE_KEYS.PASSED_LEADS_LOG]: existingLogs });
+          console.log('[Content] storePassedLead - Updated status for existing lead:', lead.leadId, 'to', status);
+        } else {
+          console.log('[Content] storePassedLead - Lead already logged:', lead.leadId);
+        }
         return;
       }
 
@@ -225,7 +235,7 @@ import {
 
       // Store updated logs
       await chrome.storage.local.set({ [STORAGE_KEYS.PASSED_LEADS_LOG]: existingLogs });
-      console.log('[Content] storePassedLead - Stored lead:', lead.leadId, 'Total logged:', existingLogs.length);
+      console.log('[Content] storePassedLead - Stored lead:', lead.leadId, 'Status:', status, 'Total logged:', existingLogs.length);
     } catch (error) {
       console.error('[Content] storePassedLead - Error:', error);
     }
@@ -1648,6 +1658,12 @@ import {
     contactButton.click();
     console.log('[Content] Phase 2: Clicked Contact Buyer Now button (single click)');
 
+    // Increment daily count IMMEDIATELY after purchase click.
+    // This is the exact moment money is spent — count must increment here,
+    // NOT after the full reply flow, to prevent unlimited purchases.
+    await incrementDailyContactCount();
+    console.log('[Content] Phase 2: Daily count incremented after purchase click. Count:', dailyContactStats?.count, '/', dailyContactStats?.limit);
+
     // Clean up the navigation prevention handler
     if (contactButton.tagName === 'A') {
       contactButton.removeEventListener('click', preventNav);
@@ -1883,8 +1899,8 @@ import {
   // Validation and date utilities imported from utils/
 
   const determineDailyLimit = (_dayOfWeek: number): number => {
-    // Phase 2: Max 2 contacts per day
-    return 2;
+    // Phase 2: Max 1 contact per session/day as requested ("Buy Only First Passed Lead")
+    return 1;
   };
 
   const initializeDailyStats = (): DailyContactStats => {
@@ -2178,23 +2194,22 @@ import {
     const keywordListEmpty = enquiryKeywords.length === 0;
     const categoryListEmpty = allowedCategories.length === 0;
 
-    // If BOTH keyword and category lists are empty, skip ALL filtering entirely
-    // All leads pass without any checks (state, quantity, order value are also skipped)
-    if (keywordListEmpty && categoryListEmpty) {
-      // Generate random delay between 1-10 minutes for leads
-      const delayOptions = [1, 5, 10];
-      const randomDelay = delayOptions[Math.floor(Math.random() * delayOptions.length)];
-      return { passed: true, reason: 'No filters configured - all leads pass', nextContactDelayMinutes: randomDelay };
-    }
+    // STRICT FILTERING: Do NOT bypass filtering even if lists are empty.
+    // User wants strict validation of Quantity/Order Value always.
+    // Removed the "if (keywordListEmpty && categoryListEmpty)" bypass block.
 
     // Filter 1: Enquiry Title Keywords (only if keyword list has data)
     if (!keywordListEmpty) {
       const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
-      const hasKeywordFromList = enquiryKeywords.some(keyword => titleLower.includes(keyword.toLowerCase()));
+
+      // Strict matching logic
+      const matchedKeyword = enquiryKeywords.find(keyword => titleLower.includes(keyword.toLowerCase()));
+      const hasKeywordFromList = !!matchedKeyword;
 
       if (!hasKeywordFromList) {
         return { passed: false, reason: 'No matching keywords found in title', nextContactDelayMinutes: 0 };
       }
+      console.log(`[Content] Filter Matched Keyword: "${matchedKeyword}" for title: "${lead.enquiryTitle}"`);
     }
 
     // Filter 2: State validation - check if state is in Indian states list
@@ -2221,6 +2236,9 @@ import {
     // Filter 3: Quantity ≥ threshold (flexible - check number first, unit match optional)
     // First check: quantity number must meet threshold
     const quantityMeetsThreshold = typeof lead.quantity === 'number' && lead.quantity >= quantityThreshold.min;
+
+    // DEBUG LOG for strict filtering verification
+    console.log(`[Content] Filter Check: Lead ${lead.leadId.substring(0, 8)}... Quantity: ${lead.quantity} (raw: "${lead.quantityRaw || 'N/A'}") vs Min: ${quantityThreshold.min}. Result: ${quantityMeetsThreshold ? 'PASS' : 'FAIL'}`);
 
     if (!quantityMeetsThreshold) {
       return {
@@ -2462,18 +2480,8 @@ import {
       return;
     }
 
-    // If both keyword and category lists are empty, stop processing entirely
-    // The extension should not scrape when no filters are configured
-    if (enquiryKeywords.length === 0 && allowedCategories.length === 0) {
-      console.log('[Content] Both keyword and category lists are empty - stopping agent');
-      lastProcessingTime = Date.now();
-      // Notify popup that agent is stopping due to no filters
-      chrome.runtime?.sendMessage?.({
-        type: 'AGENT_STOPPED_NO_FILTERS',
-        reason: 'No keywords or categories configured. Please add at least one keyword or category to start scraping.'
-      });
-      return;
-    }
+    // List check removed: adhere to strict filtering logic in applyIntelligentFilter instead.
+    // This allows users to filter ONLY by Quantity/Order Value if they wish.
 
     if (isLeadProcessingRunning) {
       lastProcessingTime = Date.now();
@@ -2568,22 +2576,40 @@ import {
           filteredLeadsCount = filteredLeads.length;
 
           // Phase 2: Click "Contact Buyer Now" if daily limit not yet reached
+          let contactStatus = 'LIMIT_REACHED';
+
           if (canContactMoreToday()) {
             console.log('[Content] Phase 2: Daily limit not reached, attempting contact for:', lead.leadId, lead.companyName);
-            const contactResult = await performContactFlow(lead.cardIndex ?? index, lead);
+
+            // CRITICAL: Store lead as ATTEMPTING before starting contact flow.
+            // This ensures record exists even if browser crashes/navigates during buy flow.
+            await storePassedLead(lead, filterResult.reason, 'ATTEMPTING');
+
+            let contactResult: { success: boolean; error?: string };
+            try {
+              contactResult = await performContactFlow(lead.cardIndex ?? index, lead);
+            } catch (error) {
+              contactResult = { success: false, error: `Contact flow crashed: ${error}` };
+              console.error('[Content] Phase 2: performContactFlow threw an error:', error);
+            }
+
+            // Daily count is now incremented INSIDE performContactFlow right after
+            // contactButton.click() — no need to increment here.
+
             if (contactResult.success) {
-              await incrementDailyContactCount();
+              contactStatus = 'CONTACTED';
               cycleActions.push(`Phase 2 CONTACTED: ${lead.companyName || lead.leadId}`);
               console.log('[Content] Phase 2: Contact successful for lead:', lead.leadId, '| Daily count:', dailyContactStats?.count, '/', dailyContactStats?.limit);
             } else {
+              contactStatus = 'FAILED';
               console.log('[Content] Phase 2: Contact failed:', contactResult.error);
               cycleActions.push(`Phase 2 contact failed: ${contactResult.error}`);
             }
           }
 
-          // Always store the passed lead (contacted or not) so user can track it
-          await storePassedLead(lead, filterResult.reason);
-          cycleActions.push(`Stored passed lead: ${lead.companyName || lead.leadId}`);
+          // Always store/update the passed lead (contacted or not) so user can track it
+          await storePassedLead(lead, filterResult.reason, contactStatus);
+          cycleActions.push(`Stored passed lead: ${lead.companyName || lead.leadId} [${contactStatus}]`);
           console.log('[Content] Stored passed lead:', lead.leadId, lead.companyName);
 
           // Mark as processed so we don't process again
