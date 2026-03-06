@@ -732,8 +732,10 @@ import {
       'no longer available'
     ];
 
-    // Look for modal/alert elements
+    // Look for modal/alert elements (includes IndiaMart-specific popup classes)
     const modalSelectors = [
+      '.sm_inn_pop_n',
+      '#innerPopup',
       '.modal',
       '.alert',
       '.popup',
@@ -1533,8 +1535,27 @@ import {
     }
     const fabricText = getTableValue(card as HTMLElement, 'Fabric') || sanitizeOptional(fabricElement?.textContent);
 
-    const orderValueNode = card.querySelector('li[title="Probable Order Value"], .bl-order-value, .probable-order');
-    const orderValueText = getTableValue(card as HTMLElement, 'Probable Order Value') || orderValueNode?.textContent || card.textContent?.match(/Probable Order Value\s*[:\-]?\s*([^\n]+)/i)?.[1];
+    // Order Value scraping: IndiaMart uses <li> elements, and the label can be
+    // "Order Value" or "Probable Order Value" depending on the page/card layout.
+    const orderValueNode = card.querySelector('li[title="Probable Order Value"], li[title="Order Value"], .bl-order-value, .probable-order');
+    let orderValueText =
+      getTableValue(card as HTMLElement, 'Probable Order Value') ||
+      getTableValue(card as HTMLElement, 'Order Value') ||
+      sanitizeOptional(orderValueNode?.textContent);
+    // Fallback: search <li> elements by text content (same pattern as fabric scraping)
+    if (!orderValueText) {
+      const orderValueLi = Array.from(card.querySelectorAll('li')).find((li) =>
+        /order\s*value/i.test(li.textContent || '')
+      );
+      if (orderValueLi) {
+        const valueEl = orderValueLi.querySelector('span, strong, b');
+        orderValueText = sanitizeOptional(valueEl?.textContent) || sanitizeOptional(orderValueLi.textContent);
+      }
+    }
+    // Final fallback: regex on full card text for both "Order Value" and "Probable Order Value"
+    if (!orderValueText) {
+      orderValueText = card.textContent?.match(/(?:Probable\s+)?Order\s+Value\s*[:\-]?\s*([^\n]+)/i)?.[1] || undefined;
+    }
     const orderValueInfo = parseRupeeRange(orderValueText || undefined);
 
     const enquiryTitle = primaryTitle || ofrTitle || requirement;
@@ -1869,6 +1890,12 @@ import {
       // Extract leadId and add to skip list
       if (lead?.leadId) {
         await addSkippedLead(lead.leadId);
+      }
+
+      // Store in rejected leads file with 'Lead Expired' reason
+      if (lead) {
+        await storeRejectedLead(lead, 'Lead Expired');
+        console.log('[Content] Phase 2: Expired lead stored in rejected leads:', lead.leadId);
       }
 
       // Dismiss the modal
@@ -2431,9 +2458,14 @@ import {
     // If categories not configured, skip category check (keywords filter is the primary gate)
 
     // Filter 5: Probable Order Value ≥ threshold (use max value for ranges like "₹3,000 to ₹10,000")
-    const orderValue = lead.probableOrderValueMax || lead.probableOrderValueMin || 0;
-    if (orderValue < orderValueMin) {
-      return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
+    // Only check when: (a) user has set a threshold > 0, AND (b) the scraper actually found an order value.
+    // If the scraper couldn't extract the order value, we skip this check rather than assuming 0
+    // and incorrectly rejecting the lead.
+    if (orderValueMin > 0) {
+      const orderValue = lead.probableOrderValueMax ?? lead.probableOrderValueMin;
+      if (orderValue !== undefined && orderValue < orderValueMin) {
+        return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
+      }
     }
 
     // Generate random delay between 1-10 minutes for qualified leads
@@ -2655,17 +2687,19 @@ import {
         // Enhanced logging for debugging
 
         const filterResult = applyIntelligentFilter(lead);
-        lead.passedFilter = filterResult.passed;
-        lead.filterReason = filterResult.reason;
-        lead.nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
-        leadEvaluations.push({ lead, passed: filterResult.passed, reason: filterResult.reason });
+        // Track filter results separately — do NOT mutate the lead object itself,
+        // as it gets stored in the rejected/passed leads log and should be clean.
+        const passedFilter = filterResult.passed;
+        const filterReason = filterResult.reason;
+        const nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
+        leadEvaluations.push({ lead, passed: passedFilter, reason: filterReason });
 
-        if (!filterResult.passed) {
+        if (!passedFilter) {
           filterFailed++;
-          console.log('[Content] FILTER REJECTED:', lead.leadId, '|', lead.enquiryTitle?.substring(0, 30), '| Reason:', filterResult.reason);
+          console.log('[Content] FILTER REJECTED:', lead.leadId, '|', lead.enquiryTitle?.substring(0, 30), '| Reason:', filterReason);
         }
 
-        if (filterResult.passed) {
+        if (passedFilter) {
           filterPassed++;
           // Add to filtered leads array for statistics/logging
           filteredLeads.push(lead);
@@ -2675,7 +2709,7 @@ import {
           if (canContactMoreToday()) {
             console.log('[Content] Daily limit not reached, attempting contact for:', lead.leadId, lead.companyName);
 
-            console.log('[Content] FILTER GATE PASSED — contacting lead:', lead.leadId, '| Keyword match:', lead.passedFilter, '| Qty:', lead.quantity, '| OrderValue:', lead.probableOrderValueMax ?? lead.probableOrderValueMin);
+            console.log('[Content] FILTER GATE PASSED — contacting lead:', lead.leadId, '| Keyword match:', passedFilter, '| Qty:', lead.quantity, '| OrderValue:', lead.probableOrderValueMax ?? lead.probableOrderValueMin);
 
             let contactResult: { success: boolean; error?: string };
             contactAttempted++;
@@ -2689,7 +2723,7 @@ import {
             if (contactResult.success) {
               // Only on confirmed success: increment daily count and store as CONTACTED
               await incrementDailyContactCount();
-              await storePassedLead(lead, filterResult.reason, 'CONTACTED');
+              await storePassedLead(lead, filterReason, 'CONTACTED');
               contactedLeadsCount++;
               contactSucceeded++;
               cycleActions.push(`CONTACTED: ${lead.companyName || lead.leadId}`);
@@ -2700,8 +2734,9 @@ import {
               console.log('[Content] Contact FAILED for:', lead.leadId, '| Error:', contactResult.error);
             }
           } else {
-            // Daily limit reached — just skip, do not log in passed file
-            console.log('[Content] Daily limit reached, skipping contact for:', lead.leadId);
+            // Daily limit reached — store lead but do NOT contact/buy
+            console.log('[Content] Daily limit reached, storing lead without contact:', lead.leadId);
+            await storePassedLead(lead, filterReason, 'STORED');
           }
 
           // Mark as processed so we don't process again
@@ -2711,7 +2746,7 @@ import {
           await delay(randomBetween(500, 1500));
         } else {
           // ========== SCRAPE-ONLY MODE: Store rejected lead with reason ==========
-          await storeRejectedLead(lead, filterResult.reason);
+          await storeRejectedLead(lead, filterReason);
           processedLeads.add(lead.leadId);
           // ========== END SCRAPE-ONLY MODE ==========
         }

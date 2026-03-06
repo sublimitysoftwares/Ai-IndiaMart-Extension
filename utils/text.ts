@@ -51,7 +51,16 @@ export const parseRupeeRange = (value?: string | null): { raw?: string; min?: nu
 
   const numbers = matches
     .map((token) => token.replace(/,/g, ''))
-    .map((token) => Number(token) * scale)
+    .map((token) => {
+      const num = Number(token);
+      // Only apply lakh/crore scale to small numbers (< 1000).
+      // Numbers like 80,000 are already in full form and should NOT be scaled.
+      // Numbers like 1.5 or 80 are in lakh/crore notation and need scaling.
+      if (scale > 1 && num < 1000) {
+        return num * scale;
+      }
+      return num;
+    })
     .filter((num) => Number.isFinite(num));
 
   if (numbers.length === 0) {
