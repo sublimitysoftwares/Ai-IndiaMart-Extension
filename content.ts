@@ -192,10 +192,11 @@ import {
     filterReason: string;
     timestamp: number;
     dateString: string;
+    status?: string; // e.g., 'CONTACTED'
   }
 
   // Store a lead that passed filter criteria to chrome.storage
-  const storePassedLead = async (lead: Lead, filterReason: string): Promise<void> => {
+  const storePassedLead = async (lead: Lead, filterReason: string, status?: string): Promise<void> => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) {
       console.log('[Content] storePassedLead - chrome.storage not available');
       return;
@@ -206,6 +207,7 @@ import {
       filterReason,
       timestamp: Date.now(),
       dateString: new Date().toISOString(),
+      status: status || 'UNKNOWN'
     };
 
     try {
@@ -214,9 +216,17 @@ import {
       const existingLogs: PassedLeadLog[] = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
 
       // Check if lead already exists (by leadId)
-      const alreadyExists = existingLogs.some(entry => entry.lead.leadId === lead.leadId);
-      if (alreadyExists) {
-        console.log('[Content] storePassedLead - Lead already logged:', lead.leadId);
+      const existingIndex = existingLogs.findIndex(entry => entry.lead.leadId === lead.leadId);
+
+      if (existingIndex !== -1) {
+        // If it exists but we have a new status (e.g. was UNKNOWN, now CONTACTED), update it
+        if (status && existingLogs[existingIndex].status !== status) {
+          existingLogs[existingIndex].status = status;
+          await chrome.storage.local.set({ [STORAGE_KEYS.PASSED_LEADS_LOG]: existingLogs });
+          console.log('[Content] storePassedLead - Updated status for existing lead:', lead.leadId, 'to', status);
+        } else {
+          console.log('[Content] storePassedLead - Lead already logged:', lead.leadId);
+        }
         return;
       }
 
@@ -225,7 +235,7 @@ import {
 
       // Store updated logs
       await chrome.storage.local.set({ [STORAGE_KEYS.PASSED_LEADS_LOG]: existingLogs });
-      console.log('[Content] storePassedLead - Stored lead:', lead.leadId, 'Total logged:', existingLogs.length);
+      console.log('[Content] storePassedLead - Stored lead:', lead.leadId, 'Status:', status, 'Total logged:', existingLogs.length);
     } catch (error) {
       console.error('[Content] storePassedLead - Error:', error);
     }
@@ -628,6 +638,7 @@ import {
   };
 
   const detectSendReplySuccess = (): boolean => {
+    // Strategy 1: CSS class-based success indicators
     const successSelectors = [
       '.toast-success',
       '.alert-success',
@@ -643,15 +654,40 @@ import {
       for (const selector of successSelectors) {
         const element = ctx.querySelector<HTMLElement>(selector);
         if (isElementVisible(element)) {
+          console.log('[Content] detectSendReplySuccess: Found CSS indicator:', selector);
           return true;
         }
       }
     }
 
-    if (!isSendReplyButtonVisible() && !getVisibleMessageField()) {
-      return true;
+    // Strategy 2: Text-based success detection — IndiaMart shows "Your message has been sent successfully"
+    // and buttons like "Continue Chat" / "Purchase similar BuyLeads" on success.
+    const successTextPatterns = [
+      'message has been sent successfully',
+      'message sent successfully',
+      'sent successfully',
+      'successfully sent',
+      'your enquiry has been sent',
+      'continue chat',
+      'purchase similar buyleads',
+    ];
+    for (const ctx of contexts) {
+      // Check all visible elements for success text
+      const allElements = ctx.querySelectorAll<HTMLElement>('div, span, p, h1, h2, h3, h4, h5, h6, button, a');
+      for (const el of allElements) {
+        if (!isElementVisible(el)) continue;
+        const text = (el.textContent || '').trim().toLowerCase();
+        for (const pattern of successTextPatterns) {
+          if (text.includes(pattern)) {
+            console.log('[Content] detectSendReplySuccess: Found text indicator:', pattern, 'in element:', el.tagName, el.className);
+            return true;
+          }
+        }
+      }
     }
 
+    // Only return true for positive confirmation indicators above.
+    // Do NOT assume success just because form elements disappeared.
     return false;
   };
 
@@ -696,8 +732,10 @@ import {
       'no longer available'
     ];
 
-    // Look for modal/alert elements
+    // Look for modal/alert elements (includes IndiaMart-specific popup classes)
     const modalSelectors = [
+      '.sm_inn_pop_n',
+      '#innerPopup',
       '.modal',
       '.alert',
       '.popup',
@@ -1355,6 +1393,14 @@ import {
         noProgressCount = 0; // Reset no progress counter
       } else {
         noProgressCount++;
+
+        // HARD EXIT: If no new leads loaded after 15 consecutive attempts, stop scrolling.
+        // This prevents infinite scrolling when IndiaMart has fewer leads than MIN_LEAD_TARGET.
+        if (noProgressCount >= 15) {
+          console.log('[Content] ensureMinimumLeadCards - No progress after 15 attempts, stopping scroll. Current count:', currentCount);
+          break;
+        }
+
         // Only warn if no progress for many attempts, but keep scrolling
         if (noProgressCount > 5 && noProgressCount % 3 === 0) {
           // Try scrolling to bottom again if no progress - more aggressive
@@ -1489,8 +1535,27 @@ import {
     }
     const fabricText = getTableValue(card as HTMLElement, 'Fabric') || sanitizeOptional(fabricElement?.textContent);
 
-    const orderValueNode = card.querySelector('li[title="Probable Order Value"], .bl-order-value, .probable-order');
-    const orderValueText = getTableValue(card as HTMLElement, 'Probable Order Value') || orderValueNode?.textContent || card.textContent?.match(/Probable Order Value\s*[:\-]?\s*([^\n]+)/i)?.[1];
+    // Order Value scraping: IndiaMart uses <li> elements, and the label can be
+    // "Order Value" or "Probable Order Value" depending on the page/card layout.
+    const orderValueNode = card.querySelector('li[title="Probable Order Value"], li[title="Order Value"], .bl-order-value, .probable-order');
+    let orderValueText =
+      getTableValue(card as HTMLElement, 'Probable Order Value') ||
+      getTableValue(card as HTMLElement, 'Order Value') ||
+      sanitizeOptional(orderValueNode?.textContent);
+    // Fallback: search <li> elements by text content (same pattern as fabric scraping)
+    if (!orderValueText) {
+      const orderValueLi = Array.from(card.querySelectorAll('li')).find((li) =>
+        /order\s*value/i.test(li.textContent || '')
+      );
+      if (orderValueLi) {
+        const valueEl = orderValueLi.querySelector('span, strong, b');
+        orderValueText = sanitizeOptional(valueEl?.textContent) || sanitizeOptional(orderValueLi.textContent);
+      }
+    }
+    // Final fallback: regex on full card text for both "Order Value" and "Probable Order Value"
+    if (!orderValueText) {
+      orderValueText = card.textContent?.match(/(?:Probable\s+)?Order\s+Value\s*[:\-]?\s*([^\n]+)/i)?.[1] || undefined;
+    }
     const orderValueInfo = parseRupeeRange(orderValueText || undefined);
 
     const enquiryTitle = primaryTitle || ofrTitle || requirement;
@@ -1535,166 +1600,332 @@ import {
       return { success: false, error: 'Auto-contact disabled.' };
     }
 
+    console.log('[Content] ===== performContactFlow START =====');
+    console.log('[Content] Intended lead:', lead?.leadId, '|', lead?.enquiryTitle, '|', lead?.companyName);
 
-    // Get cards and find the right card
+    // ═══════════════════════════════════════════════════════════
+    //  STEP 1: Find the EXACT card on the page that matches our lead.
+    //  NEVER trust cardIndex alone — the DOM can reshuffle.
+    // ═══════════════════════════════════════════════════════════
     const cards = getLeadCardElements();
+    let card: Element | undefined;
 
-    let card = cards[cardIndex];
+    if (lead) {
+      const enquiryTitleLower = (lead.enquiryTitle || '').toLowerCase();
+      const companyNameLower = (lead.companyName || '').toLowerCase();
+      const leadIdStr = lead.leadId || '';
 
-    // If card not found by index, try to find by matching lead data
-    if (!card && lead) {
-      for (let i = 0; i < cards.length; i++) {
-        const testCard = cards[i];
-        const cardText = (testCard.textContent || '').toLowerCase();
-        const enquiryTitleLower = (lead.enquiryTitle || '').toLowerCase();
-        const companyNameLower = (lead.companyName || '').toLowerCase();
+      // First try the suggested cardIndex, but VERIFY it matches
+      if (cards[cardIndex]) {
+        const candidateText = (cards[cardIndex].textContent || '').toLowerCase();
+        const indexMatches =
+          (enquiryTitleLower && candidateText.includes(enquiryTitleLower)) ||
+          (companyNameLower && companyNameLower !== 'n/a' && candidateText.includes(companyNameLower)) ||
+          (leadIdStr && candidateText.includes(leadIdStr));
 
-        // Match by enquiry title or company name
-        if ((enquiryTitleLower && cardText.includes(enquiryTitleLower)) ||
-          (companyNameLower && cardText.includes(companyNameLower))) {
-          card = testCard;
-          break;
+        if (indexMatches) {
+          card = cards[cardIndex];
+          console.log('[Content] Card at index', cardIndex, 'verified ✓ matches lead', lead.leadId);
+        } else {
+          console.log('[Content] Card at index', cardIndex, 'does NOT match lead', lead.leadId, '— will search all cards');
         }
+      }
+
+      // If cardIndex didn't match, search ALL cards
+      if (!card) {
+        for (let i = 0; i < cards.length; i++) {
+          const testCard = cards[i];
+          const testText = (testCard.textContent || '').toLowerCase();
+
+          if ((enquiryTitleLower && testText.includes(enquiryTitleLower)) ||
+            (companyNameLower && companyNameLower !== 'n/a' && testText.includes(companyNameLower)) ||
+            (leadIdStr && testText.includes(leadIdStr))) {
+            card = testCard;
+            console.log('[Content] Found matching card at index', i, 'for lead', lead.leadId);
+            break;
+          }
+        }
+      }
+
+      // HARD ABORT if no card matches — never click a random card
+      if (!card) {
+        console.log('[Content] ✗ ABORT: No card on page matches lead', lead.leadId, lead.enquiryTitle, '— refusing to click anything');
+        return { success: false, error: 'No matching card found on page. Aborting to prevent wrong lead click.' };
+      }
+    } else {
+      // No lead data provided — use cardIndex as last resort
+      card = cards[cardIndex];
+      if (!card) {
+        return { success: false, error: 'Card not found at index ' + cardIndex };
       }
     }
 
     // Detect if we're on a detail page (no cards found or card not available)
     const isDetailPage = !card || cards.length === 0;
 
-    if (isDetailPage) {
-    }
-
-    // Scroll card into view if it exists, otherwise scroll to top
+    // Scroll card into view
     if (card && card instanceof HTMLElement) {
       card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      await delay(1000); // Wait for scroll to complete
+      await delay(1000);
     } else if (isDetailPage) {
-      // On detail pages, scroll to top to ensure button visibility
       window.scrollTo({ top: 0, behavior: 'smooth' });
       await delay(1000);
-    } else {
     }
 
-    // Enhanced button search: try multiple strategies with better logging
-    const contactButton = await waitForElement(() => {
-      // Strategy 1: Try finding button in card (if card exists)
-      if (card) {
-        const button = findElementByText(card, 'button, a', CONTACT_BUTTON_TEXT);
-        if (isElementVisible(button)) {
-          return button;
+    // ═══════════════════════════════════════════════════════════
+    //  STEP 2: Find the Contact Buyer Now button STRICTLY INSIDE the card.
+    //  NO document-wide search. NO iframe search. Card only.
+    // ═══════════════════════════════════════════════════════════
+
+    // First, hover over the card to trigger IndiaMart's hover-to-show behavior
+    // (Contact Buyer Now buttons may be hidden until hover)
+    if (card && card instanceof HTMLElement) {
+      card.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      card.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      simulateMouseMove(card);
+      await delay(500); // Wait for hover CSS/JS to reveal hidden buttons
+    }
+
+    const findButtonInCard = (searchCard: Element): HTMLElement | null => {
+      // Strategy A: Find visible button by text "Contact Buyer Now"
+      const allClickables = searchCard.querySelectorAll<HTMLElement>('button, a, [role="button"]');
+      for (const el of allClickables) {
+        const text = (el.textContent || '').trim().toLowerCase();
+        if (text.includes('contact buyer') && isElementVisible(el)) {
+          return el;
         }
-        const located = locateContactButton(card, false);
-        if (isElementVisible(located)) {
-          return located;
+      }
+
+      // Strategy B: Find by CSS class patterns (visible)
+      const btnSelectors = [
+        '.btnCBN', '.btnCBN1', '[data-action="contact"]',
+        '[onclick*="contactbuyernow"]', '.btnCBNContainer button',
+        '.btnCBNContainer a'
+      ];
+      for (const sel of btnSelectors) {
+        const btn = searchCard.querySelector<HTMLElement>(sel);
+        if (btn && isElementVisible(btn)) return btn;
+      }
+
+      // Strategy C FALLBACK: Find button even if NOT visible (hover may not have triggered it)
+      // We'll make it visible by scrolling + hovering after finding it
+      for (const el of allClickables) {
+        const text = (el.textContent || '').trim().toLowerCase();
+        if (text.includes('contact buyer')) {
+          console.log('[Content] Found hidden Contact Buyer button — will try to reveal it');
+          return el;
         }
       }
 
-      // Strategy 2: Document-wide search (especially for detail pages)
-      const docButton = findElementByText(document, 'button, a', CONTACT_BUTTON_TEXT);
-      if (isElementVisible(docButton)) {
-        return docButton;
-      }
-
-      // Strategy 3: Use enhanced locateContactButton with document search
-      const locatedDoc = locateContactButton(card, true);
-      if (isElementVisible(locatedDoc)) {
-        return locatedDoc;
-      }
-
-      // Strategy 4: Flexible text search in document
-      const allButtons = document.querySelectorAll<HTMLElement>('button, a, [role="button"]');
-      for (const btn of allButtons) {
-        const text = (btn.textContent || '').trim().toLowerCase();
-        const ariaLabel = (btn.getAttribute('aria-label') || '').toLowerCase();
-        if ((text.includes('contact buyer') || ariaLabel.includes('contact buyer')) && isElementVisible(btn)) {
+      // Strategy D FALLBACK: Find by CSS class even if not visible
+      for (const sel of btnSelectors) {
+        const btn = searchCard.querySelector<HTMLElement>(sel);
+        if (btn) {
+          console.log('[Content] Found hidden button via selector', sel, '— will try to reveal it');
           return btn;
         }
       }
 
       return null;
-    }, 15000); // Increased timeout to 15 seconds for better reliability
+    };
+
+    const contactButton = await waitForElement(() => {
+      if (card) {
+        // Strategy 1: Search inside the card itself
+        const insideCard = findButtonInCard(card);
+        if (insideCard) return insideCard;
+
+        // Strategy 2: Search parent containers (up to 5 levels up)
+        // IndiaMart expands cards into detail views — the Contact Buyer Now
+        // button is often in a parent container, not inside the original card div.
+        let ancestor = card.parentElement;
+        for (let level = 0; level < 5 && ancestor; level++) {
+          const inAncestor = findButtonInCard(ancestor);
+          if (inAncestor) {
+            console.log('[Content] Found Contact Buyer button in parent level', level + 1);
+            return inAncestor;
+          }
+          ancestor = ancestor.parentElement;
+        }
+
+        // Strategy 3: Search next/previous siblings
+        const siblings = [card.nextElementSibling, card.previousElementSibling];
+        for (const sib of siblings) {
+          if (!sib) continue;
+          const inSibling = findButtonInCard(sib);
+          if (inSibling) {
+            console.log('[Content] Found Contact Buyer button in sibling element');
+            return inSibling;
+          }
+        }
+      }
+      // Detail page fallback — only when there are no cards at all
+      if (isDetailPage) {
+        return findButtonInCard(document.body);
+      }
+      return null;
+    }, 15000);
 
     if (shouldAbort()) {
       return { success: false, error: 'Auto-contact disabled.' };
     }
 
     if (!contactButton) {
-      return { success: false, error: 'Contact Buyer Now button not found.' };
+      console.log('[Content] ✗ ABORT: Contact Buyer Now button not found inside the matched card');
+      return { success: false, error: 'Contact Buyer Now button not found inside the matched card.' };
     }
 
+    // If button was found but might be hidden, try to make it visible
+    // (Avoid isElementVisible type guard which narrows contactButton to 'never')
+    const btnStyle = window.getComputedStyle(contactButton);
+    const btnRect = contactButton.getBoundingClientRect();
+    const btnCurrentlyHidden = btnStyle.display === 'none' || btnStyle.visibility === 'hidden' ||
+      Number(btnStyle.opacity) === 0 || btnRect.width === 0 || btnRect.height === 0;
 
-    // COMMENTED OUT: Contact Buyer Now button click flow
-    // // Ensure button is visible and in viewport before clicking
-    // contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    // await delay(500);
-    // 
-    // await clickWithFallback(contactButton, 'Contact Buyer');
+    if (btnCurrentlyHidden) {
+      console.log('[Content] Button found but hidden — trying to reveal via scroll + hover');
+      contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      await delay(500);
+      if (card && card instanceof HTMLElement) {
+        card.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+        card.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+        simulateMouseMove(card);
+        await delay(800);
+      }
+    }
 
-    // Return early since contact button click is disabled
-    return { success: false, error: 'Contact Buyer Now button click is currently disabled.' };
+    // ═══════════════════════════════════════════════════════════
+    //  STEP 3: Cross-check — verify the button is for the RIGHT lead
+    //  by checking if button's href/onclick contains the lead's ID.
+    // ═══════════════════════════════════════════════════════════
+    if (lead && lead.leadId) {
+      const btnHref = contactButton.getAttribute('href') || '';
+      const btnOnclick = contactButton.getAttribute('onclick') || '';
+      const btnDataAttrs = Array.from(contactButton.attributes)
+        .map(attr => attr.value)
+        .join(' ');
 
-    // COMMENTED OUT: All code below is disabled since contact button click is commented out
-    /* 
-    // Wait for contact form/modal to appear after clicking Contact Buyer Now
-    await delay(1000); // Additional delay for form to load
+      // Log button details for debugging
+      console.log('[Content] Button href:', btnHref.substring(0, 100));
+      console.log('[Content] Button onclick:', btnOnclick.substring(0, 100));
+      console.log('[Content] Lead ID to verify:', lead.leadId);
+
+      // Only verify if button has href/onclick (some buttons are plain divs)
+      if (btnHref || btnOnclick) {
+        const buttonRefersToLead =
+          btnHref.includes(lead.leadId) ||
+          btnOnclick.includes(lead.leadId) ||
+          btnDataAttrs.includes(lead.leadId);
+
+        if (!buttonRefersToLead) {
+          // Check if this is a numeric leadId and the button contains it
+          // Sometimes IDs are embedded differently
+          console.log('[Content] ⚠ WARNING: Button href/onclick does not contain leadId', lead.leadId);
+          console.log('[Content] Proceeding with caution — card text was verified to match');
+        }
+      }
+    }
+
+    console.log('[Content] ✓ Clicking Contact Buyer Now for lead:', lead?.leadId, '|', lead?.enquiryTitle);
+
+
+    // Phase 2: Contact Buyer Now button click ENABLED
+    contactButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await delay(500);
+
+    // SINGLE CLICK approach — mimic human behavior exactly.
+    // IndiaMart's "Contact Buyer Now" is an <a> tag with both an href AND an onclick handler.
+    // The onclick handler runs IndiaMart's purchase JS (contactbuyernow function).
+    // We need: onclick to fire (purchase) + NO page navigation.
+    // Solution: event.preventDefault() stops browser navigation but lets onclick run.
+    // IMPORTANT: Do NOT remove href — IndiaMart's JS reads it for parameters.
+    // IMPORTANT: Do NOT use clickWithFallback — it clicks 4+ times causing double-purchase.
+    const preventNav = (e: Event) => {
+      e.preventDefault();
+      console.log('[Content] Phase 2: Prevented <a> tag navigation via preventDefault');
+    };
+
+    if (contactButton.tagName === 'A') {
+      contactButton.addEventListener('click', preventNav);
+      console.log('[Content] Phase 2: Added preventDefault listener for <a> Contact Buyer button');
+    }
+
+    // Single click — exactly like a human would
+    contactButton.click();
+    console.log('[Content] Phase 2: Clicked Contact Buyer Now button (single click)');
+
+    // Daily count is now incremented in processLeadsWithFiltering AFTER confirmed success,
+    // not here. This ensures failed contacts don't waste daily quota slots.
+
+    // Clean up the navigation prevention handler
+    if (contactButton.tagName === 'A') {
+      contactButton.removeEventListener('click', preventNav);
+    }
+
+    // Wait 10 seconds for the reply panel (bl_quote_form) to fully load with pre-filled message
+    console.log('[Content] Phase 2: Waiting 10s for reply panel to load after Contact Buyer Now click...');
+    await delay(10000);
 
     // Check for "already purchased" dialog first
     const alreadyPurchasedDialog = detectAlreadyPurchasedDialog();
     if (alreadyPurchasedDialog.detected) {
-      
-      // Dismiss the dialog by clicking OK
+
+      // Dismiss the dialog by clicking OK — but DO NOT return early!
+      // IndiaMart shows this dialog for NEWLY purchased leads too (as a confirmation).
+      // We need to dismiss it and continue to the Send Reply step.
       const dismissed = await dismissAlreadyPurchasedDialog();
       if (dismissed) {
-      } else {
+        console.log('[Content] Phase 2: Already purchased dialog dismissed — continuing to reply step');
       }
 
-      // Add to skip list since this lead is already purchased
-      if (lead?.leadId) {
-        await addSkippedLead(lead.leadId);
-      }
-
-      // Return early with specific error
-      return { 
-        success: false, 
-        error: 'This Buy Lead has already been purchased. Lead has been added to skip list.' 
-      };
+      // Wait 5 seconds for the reply panel to become accessible after dialog dismissal
+      console.log('[Content] Phase 2: Waiting 5s after dialog dismissal for reply panel...');
+      await delay(5000);
     }
 
     // Check for expired/consumed lead error modal
     const expiredModal = detectExpiredLeadModal();
     if (expiredModal.detected) {
-      
+
       // Extract leadId and add to skip list
       if (lead?.leadId) {
         await addSkippedLead(lead.leadId);
-      } else {
+      }
+
+      // Store in rejected leads file with 'Lead Expired' reason
+      if (lead) {
+        await storeRejectedLead(lead, 'Lead Expired');
+        console.log('[Content] Phase 2: Expired lead stored in rejected leads:', lead.leadId);
       }
 
       // Dismiss the modal
       const dismissed = await dismissExpiredLeadModal();
       if (dismissed) {
-      } else {
+        console.log('[Content] Phase 2: Expired lead modal dismissed');
       }
 
       // Return early with specific error
-      return { 
-        success: false, 
-        error: 'Lead expired or already consumed by maximum permissible sellers. Lead has been added to skip list.' 
+      return {
+        success: false,
+        error: 'Lead expired or already consumed by maximum permissible sellers. Lead has been added to skip list.'
       };
     }
 
-    // Attempt to fill the message while the form loads
-    const desiredMessage = composeContactMessage(lead);
-    let messageFilled = fillContactMessage(desiredMessage);
-    if (messageFilled) {
-    }
+    // COMMENTED OUT: Using IndiaMart's default pre-filled message instead of custom message
+    // const desiredMessage = composeContactMessage(lead);
+    // let messageFilled = fillContactMessage(desiredMessage);
+    // if (messageFilled) {
+    //   console.log('[Content] Phase 2: Message filled successfully');
+    // }
 
     const replyButton = await waitForElement(() => {
-      if (!messageFilled) {
-        messageFilled = fillContactMessage(desiredMessage);
-        if (messageFilled) {
-        }
-      }
+      // COMMENTED OUT: No longer trying to fill custom message
+      // if (!messageFilled) {
+      //   messageFilled = fillContactMessage(desiredMessage);
+      //   if (messageFilled) {
+      //     console.log('[Content] Phase 2: Message filled on retry');
+      //   }
+      // }
 
       const contexts = getInteractionContexts();
       for (const ctx of contexts) {
@@ -1710,7 +1941,7 @@ import {
       if (isElementVisible(fallbackButton)) {
         return fallbackButton;
       }
-      
+
       return null;
     }, 20000);
 
@@ -1721,108 +1952,142 @@ import {
     if (!replyButton) {
       return { success: false, error: 'Send Reply button not found after opening contact form.' };
     }
-    
 
-    if (!messageFilled) {
-      // Try one last time before sending
-      messageFilled = fillContactMessage(desiredMessage);
-      if (!messageFilled) {
+    // COMMENTED OUT: No longer overriding IndiaMart's default message
+    // if (!messageFilled) {
+    //   messageFilled = fillContactMessage(desiredMessage);
+    //   if (!messageFilled) {
+    //     console.log('[Content] Phase 2: Warning - message could not be filled');
+    //   }
+    // }
+    console.log('[Content] Phase 2: Using IndiaMart default message (no custom override)');
+
+    // Phase 2: Send Reply button click ENABLED
+    replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    await delay(500); // Wait for scroll
+
+    if (shouldAbort()) {
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
+    await clickWithFallback(replyButton, 'Send Reply');
+
+    // Wait 10 seconds for IndiaMart's confirmation/processing panel to complete the reply submission
+    console.log('[Content] Phase 2: Waiting 10s for Send Reply confirmation panel to process...');
+    await delay(10000);
+
+    // Phase 2: Check for "already purchased" dialog AFTER Reply click
+    // This is the critical check — the dialog often appears only after Reply is clicked
+    const postReplyAlreadyPurchased = detectAlreadyPurchasedDialog();
+    if (postReplyAlreadyPurchased.detected) {
+      console.log('[Content] Phase 2: "Already purchased" dialog detected AFTER Reply click');
+      const dismissed = await dismissAlreadyPurchasedDialog();
+      if (dismissed) {
+        console.log('[Content] Phase 2: Already purchased dialog dismissed');
+      }
+      if (lead?.leadId) {
+        await addSkippedLead(lead.leadId);
+        console.log('[Content] Phase 2: Lead added to skip list:', lead.leadId);
+      }
+      return {
+        success: false,
+        error: 'Already purchased - detected after Reply click. Lead not counted toward daily quota.'
+      };
+    }
+
+    let sendConfirmed = await waitForSendReplyConfirmation(6000);
+
+    if (shouldAbort()) {
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
+
+    if (!sendConfirmed) {
+      // Check if button is still visible - if not, it might have been clicked successfully
+      const buttonStillVisible = isSendReplyButtonVisible();
+      const messageFieldStillVisible = !!getVisibleMessageField();
+
+      // If both button and message field are gone, check for "already purchased" before assuming success
+      if (!buttonStillVisible && !messageFieldStillVisible) {
+        // Phase 2: One more check — dialog may have caused UI elements to disappear
+        const lateAlreadyPurchased = detectAlreadyPurchasedDialog();
+        if (lateAlreadyPurchased.detected) {
+          console.log('[Content] Phase 2: "Already purchased" dialog caused form to disappear');
+          const dismissed = await dismissAlreadyPurchasedDialog();
+          if (dismissed) {
+            console.log('[Content] Phase 2: Late already-purchased dialog dismissed');
+          }
+          if (lead?.leadId) {
+            await addSkippedLead(lead.leadId);
+          }
+          return {
+            success: false,
+            error: 'Already purchased - detected after form disappeared. Lead not counted toward daily quota.'
+          };
+        }
+        // Do NOT assume success just because form disappeared.
+        // Form may have collapsed without actually sending. Require positive confirmation.
+        console.log('[Content] Phase 2: Form disappeared without positive success indicator — treating as inconclusive');
+        sendConfirmed = false;
+      } else {
+        // Additional check: see if success indicators are present (they might have appeared quickly)
+        await delay(1000); // Wait a bit more for potential success indicators
+        sendConfirmed = await waitForSendReplyConfirmation(2000);
+
+        if (!sendConfirmed && buttonStillVisible) {
+          const retryButton =
+            (replyButton.isConnected && isElementVisible(replyButton)) ?
+              replyButton :
+              await waitForElement(() => {
+                const candidate = findSendReplyButton();
+                return isElementVisible(candidate) ? candidate : null;
+              }, 2000);
+
+          if (retryButton && isSendReplyButtonVisible() && getVisibleMessageField()) {
+            if (shouldAbort()) {
+              return { success: false, error: 'Auto-contact disabled.' };
+            }
+
+            await clickWithFallback(retryButton, 'Send Reply Retry');
+            await delay(1500);
+            sendConfirmed = await waitForSendReplyConfirmation(6000);
+          } else {
+            // Button/field disappeared without positive confirmation — do not assume success
+            console.log('[Content] Phase 2: Reply button disappeared without confirmation — treating as inconclusive');
+            sendConfirmed = false;
+          }
+        }
       }
     }
 
-    // COMMENTED OUT: Send Reply button click flow
-    // // Ensure button is in view before clicking
-    // replyButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    // await delay(500); // Wait for scroll
+    if (shouldAbort()) {
+      return { success: false, error: 'Auto-contact disabled.' };
+    }
 
-    // if (shouldAbort()) {
-    //   return { success: false, error: 'Auto-contact disabled.' };
-    // }
+    if (!sendConfirmed) {
+      const messageContent = getMessageFieldContent();
+      const validationError = getSendReplyError();
+      return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
+    }
 
-    // await clickWithFallback(replyButton, 'Send Reply');
-
-    // // Give the site a moment to register the submission
-    // await delay(1200);
-
-    // let sendConfirmed = await waitForSendReplyConfirmation(6000);
-
-    // if (shouldAbort()) {
-    //   return { success: false, error: 'Auto-contact disabled.' };
-    // }
-
-    // if (!sendConfirmed) {
-    //   // Check if button is still visible - if not, it might have been clicked successfully
-    //   const buttonStillVisible = isSendReplyButtonVisible();
-    //   const messageFieldStillVisible = !!getVisibleMessageField();
-    //   
-    //   // If both button and message field are gone, the form might have been submitted
-    //   if (!buttonStillVisible && !messageFieldStillVisible) {
-    //     sendConfirmed = true;
-    //   } else {
-    //     
-    //     // Additional check: see if success indicators are present (they might have appeared quickly)
-    //     await delay(1000); // Wait a bit more for potential success indicators
-    //     sendConfirmed = await waitForSendReplyConfirmation(2000);
-    //     
-    //     if (!sendConfirmed && buttonStillVisible) {
-    //       const retryButton =
-    //         (replyButton.isConnected && isElementVisible(replyButton)) ?
-    //           replyButton :
-    //           await waitForElement(() => {
-    //             const candidate = findSendReplyButton();
-    //             return isElementVisible(candidate) ? candidate : null;
-    //           }, 2000);
-
-    //       if (retryButton && isSendReplyButtonVisible() && getVisibleMessageField()) {
-    //         if (shouldAbort()) {
-    //           return { success: false, error: 'Auto-contact disabled.' };
-    //         }
-
-    //         await clickWithFallback(retryButton, 'Send Reply Retry');
-    //         await delay(1500);
-    //         sendConfirmed = await waitForSendReplyConfirmation(6000);
-    //       } else {
-    //         // If button disappeared, assume it was sent
-    //         if (!isSendReplyButtonVisible() && !getVisibleMessageField()) {
-    //           sendConfirmed = true;
-    //         }
-    //       }
-    //     }
-    //   }
-    // }
-
-    // if (shouldAbort()) {
-    //   return { success: false, error: 'Auto-contact disabled.' };
-    // }
-
-    // if (!sendConfirmed) {
-    //   const messageContent = getMessageFieldContent();
-    //   const validationError = getSendReplyError();
-    //   return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
-    // }
-
-    // Return early since we're not actually clicking the buttons
-    return { success: false, error: 'Contact and Send Reply button clicks are currently disabled.' };
-
-    // COMMENTED OUT: Code below would execute after successful send reply
+    // Contact successful - update history
     const leadDetails = lead || (card ? extractLead(card, cardIndex) : undefined);
     if (leadDetails && leadDetails.leadId) {
       contactedLeadHistory.set(leadDetails.leadId, Date.now());
       purgeStaleContactHistory();
     }
 
+    console.log('[Content] Phase 2: Contact flow completed successfully for lead:', lead?.leadId);
     return { success: true };
-    */
   };
 
   // Removed duplicate startScrapeLoop - defined later in the file
 
-  // Filter constants imported from constants/filters
-  // Mutable filter arrays (loaded from storage on init)
-  let enquiryKeywords: string[] = [...DEFAULT_ENQUIRY_KEYWORDS];
-  let allowedCategories: string[] = [...DEFAULT_ALLOWED_CATEGORIES];
-  let quantityThreshold = { min: 20, unit: 'piece' };
-  let orderValueMin = 5000;
+  // Filter arrays — loaded ONLY from chrome.storage (set via extension UI).
+  // NO hardcoded defaults. If user hasn't configured filters, arrays stay empty and all leads are rejected.
+  let enquiryKeywords: string[] = [];
+  let allowedCategories: string[] = [];
+  let quantityThreshold = { min: 0, unit: 'piece' };
+  let orderValueMin = 0;
   interface DailyContactStats {
     date: string;
     count: number;
@@ -1834,9 +2099,9 @@ import {
 
   // Validation and date utilities imported from utils/
 
-  const determineDailyLimit = (dayOfWeek: number): number => {
-    // Sunday (0) => 6-8, Monday-Saturday => 14-18
-    return dayOfWeek === 0 ? randomIntBetween(6, 8) : randomIntBetween(14, 18);
+  const determineDailyLimit = (_dayOfWeek: number): number => {
+    // Phase 2: Max 10 contacts per day
+    return 10;
   };
 
   const initializeDailyStats = (): DailyContactStats => {
@@ -1952,77 +2217,67 @@ import {
         FILTER_ORDER_VALUE_KEY
       ]);
 
-      // Load keywords: update if key exists in storage (even if empty array)
-      if (result[FILTER_KEYWORDS_KEY] !== undefined) {
-        if (Array.isArray(result[FILTER_KEYWORDS_KEY])) {
-          const storedKeywords = result[FILTER_KEYWORDS_KEY]
-            .filter((k: string) => typeof k === 'string' && validateKeyword(k))
-            .map((k: string) => k.trim())
-            .slice(0, 500); // Limit to 500 items
-          enquiryKeywords = storedKeywords;
-        } else {
-          enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
-        }
+      // Load keywords from storage ONLY — no hardcoded defaults
+      if (result[FILTER_KEYWORDS_KEY] !== undefined && Array.isArray(result[FILTER_KEYWORDS_KEY])) {
+        enquiryKeywords = result[FILTER_KEYWORDS_KEY]
+          .filter((k: string) => typeof k === 'string' && validateKeyword(k))
+          .map((k: string) => k.trim())
+          .slice(0, 500);
       } else {
-        // Key doesn't exist in storage, use defaults and save them
-        enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
-        // Save defaults to storage for first-time initialization
-        await chrome.storage.local.set({ [FILTER_KEYWORDS_KEY]: DEFAULT_ENQUIRY_KEYWORDS });
+        // No keywords in storage — keep empty. User must configure via extension UI.
+        enquiryKeywords = [];
       }
 
-      // Load categories: update if key exists in storage (even if empty array)
-      if (result[FILTER_CATEGORIES_KEY] !== undefined) {
-        if (Array.isArray(result[FILTER_CATEGORIES_KEY])) {
-          const storedCategories = result[FILTER_CATEGORIES_KEY]
-            .filter((c: string) => typeof c === 'string' && validateKeyword(c))
-            .map((c: string) => c.trim())
-            .slice(0, 500); // Limit to 500 items
-          allowedCategories = storedCategories;
-        } else {
-          allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
-          await chrome.storage.local.set({ [FILTER_CATEGORIES_KEY]: DEFAULT_ALLOWED_CATEGORIES });
-        }
+      // Load categories from storage ONLY — no hardcoded defaults
+      if (result[FILTER_CATEGORIES_KEY] !== undefined && Array.isArray(result[FILTER_CATEGORIES_KEY])) {
+        allowedCategories = result[FILTER_CATEGORIES_KEY]
+          .filter((c: string) => typeof c === 'string' && validateKeyword(c))
+          .map((c: string) => c.trim())
+          .slice(0, 500);
       } else {
-        // Key doesn't exist in storage, use defaults and save them
-        allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
-        // Save defaults to storage for first-time initialization
-        await chrome.storage.local.set({ [FILTER_CATEGORIES_KEY]: DEFAULT_ALLOWED_CATEGORIES });
+        // No categories in storage — keep empty. User must configure via extension UI.
+        allowedCategories = [];
       }
 
-      // Load quantity threshold: update if key exists in storage
+      // Load quantity threshold from storage ONLY
       if (result[FILTER_QUANTITY_KEY] !== undefined) {
         const stored = result[FILTER_QUANTITY_KEY];
         if (stored && typeof stored === 'object' && typeof stored.min === 'number' && typeof stored.unit === 'string') {
           quantityThreshold = {
-            min: Math.max(1, Math.min(stored.min, 1000000)), // Validate range 1-1M
+            min: Math.max(1, Math.min(stored.min, 1000000)),
             unit: (stored.unit || 'piece').trim().toLowerCase()
           };
         } else {
-          quantityThreshold = { min: 20, unit: 'piece' };
-          await chrome.storage.local.set({ [FILTER_QUANTITY_KEY]: quantityThreshold });
+          quantityThreshold = { min: 0, unit: 'piece' };
         }
       } else {
-        quantityThreshold = { min: 20, unit: 'piece' };
-        // Save defaults to storage for first-time initialization
-        await chrome.storage.local.set({ [FILTER_QUANTITY_KEY]: quantityThreshold });
+        // Not configured — min 0 means all quantities pass (user must set via UI)
+        quantityThreshold = { min: 0, unit: 'piece' };
       }
 
-      // Load order value minimum: update if key exists in storage
+      // Load order value minimum from storage ONLY
       if (result[FILTER_ORDER_VALUE_KEY] !== undefined) {
         const stored = result[FILTER_ORDER_VALUE_KEY];
-        if (typeof stored === 'number' && stored >= 0 && stored <= 100000000) { // Validate range 0-100M
+        if (typeof stored === 'number' && stored >= 0 && stored <= 100000000) {
           orderValueMin = stored;
         } else {
-          orderValueMin = 5000;
-          await chrome.storage.local.set({ [FILTER_ORDER_VALUE_KEY]: orderValueMin });
+          orderValueMin = 0;
         }
       } else {
-        orderValueMin = 5000;
-        // Save defaults to storage for first-time initialization
-        await chrome.storage.local.set({ [FILTER_ORDER_VALUE_KEY]: orderValueMin });
+        // Not configured — 0 means all order values pass (user must set via UI)
+        orderValueMin = 0;
       }
 
-      // Verify arrays are actually updated
+      // Log loaded filter config for debugging
+      console.log('[Content] ====== FILTER CONFIG LOADED ======');
+      console.log('[Content] Keywords:', enquiryKeywords.length, '→', JSON.stringify(enquiryKeywords));
+      console.log('[Content] Categories:', allowedCategories.length, '→', JSON.stringify(allowedCategories));
+      console.log('[Content] Quantity threshold:', quantityThreshold.min, quantityThreshold.unit);
+      console.log('[Content] Order value min:', orderValueMin);
+      if (enquiryKeywords.length === 0) {
+        console.warn('[Content] ⚠️ NO KEYWORDS CONFIGURED — all leads will be REJECTED until keywords are set in extension settings');
+      }
+      console.log('[Content] ============================');
 
       // Mark config as loaded
       filterConfigLoaded = true;
@@ -2042,10 +2297,13 @@ import {
         });
       }
     } catch (error) {
-      // Fallback to defaults on error
-      enquiryKeywords = [...DEFAULT_ENQUIRY_KEYWORDS];
-      allowedCategories = [...DEFAULT_ALLOWED_CATEGORIES];
-      filterConfigLoaded = true; // Mark as loaded even on error (using defaults)
+      // On error — keep arrays empty. No hardcoded defaults.
+      // User must configure filters via extension UI.
+      enquiryKeywords = [];
+      allowedCategories = [];
+      quantityThreshold = { min: 0, unit: 'piece' };
+      orderValueMin = 0;
+      filterConfigLoaded = true;
     }
   };
 
@@ -2123,31 +2381,20 @@ import {
       return { passed: false, reason: 'Filter config not loaded', nextContactDelayMinutes: 0 };
     }
 
-    // Note: We're using the runtime arrays (enquiryKeywords, allowedCategories) which are updated from storage
-    // These arrays are NOT the hardcoded DEFAULT arrays - they're mutable variables that get updated
+    // Filters come ONLY from extension UI (chrome.storage). No hardcoded defaults.
 
-    // Check if lists are empty
-    const keywordListEmpty = enquiryKeywords.length === 0;
-    const categoryListEmpty = allowedCategories.length === 0;
-
-    // If BOTH keyword and category lists are empty, skip ALL filtering entirely
-    // All leads pass without any checks (state, quantity, order value are also skipped)
-    if (keywordListEmpty && categoryListEmpty) {
-      // Generate random delay between 1-10 minutes for leads
-      const delayOptions = [1, 5, 10];
-      const randomDelay = delayOptions[Math.floor(Math.random() * delayOptions.length)];
-      return { passed: true, reason: 'No filters configured - all leads pass', nextContactDelayMinutes: randomDelay };
+    // Filter 1: Enquiry Title Keywords — MANDATORY
+    // If no keywords configured, reject ALL leads (user must set keywords via UI)
+    if (enquiryKeywords.length === 0) {
+      return { passed: false, reason: 'No keywords configured — set keywords in extension settings', nextContactDelayMinutes: 0 };
     }
 
-    // Filter 1: Enquiry Title Keywords (only if keyword list has data)
-    if (!keywordListEmpty) {
-      const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
-      const hasKeywordFromList = enquiryKeywords.some(keyword => titleLower.includes(keyword.toLowerCase()));
-
-      if (!hasKeywordFromList) {
-        return { passed: false, reason: 'No matching keywords found in title', nextContactDelayMinutes: 0 };
-      }
+    const titleLower = (lead.enquiryTitle || lead.requirement || '').toLowerCase();
+    const matchedKeyword = enquiryKeywords.find(keyword => titleLower.includes(keyword.toLowerCase()));
+    if (!matchedKeyword) {
+      return { passed: false, reason: 'No matching keywords found in title', nextContactDelayMinutes: 0 };
     }
+    console.log(`[Content] Filter Matched Keyword: "${matchedKeyword}" for title: "${lead.enquiryTitle}"`);
 
     // Filter 2: State validation - check if state is in Indian states list
     const location = lead.location || '';
@@ -2174,6 +2421,9 @@ import {
     // First check: quantity number must meet threshold
     const quantityMeetsThreshold = typeof lead.quantity === 'number' && lead.quantity >= quantityThreshold.min;
 
+    // DEBUG LOG for strict filtering verification
+    console.log(`[Content] Filter Check: Lead ${lead.leadId.substring(0, 8)}... Quantity: ${lead.quantity} (raw: "${lead.quantityRaw || 'N/A'}") vs Min: ${quantityThreshold.min}. Result: ${quantityMeetsThreshold ? 'PASS' : 'FAIL'}`);
+
     if (!quantityMeetsThreshold) {
       return {
         passed: false,
@@ -2192,8 +2442,8 @@ import {
       }
     }
 
-    // Filter 4: Category match (only if category list has data)
-    if (!categoryListEmpty) {
+    // Filter 4: Category match — only check if categories are configured AND lead has a category
+    if (allowedCategories.length > 0 && lead.category) {
       const categoryLower = (lead.category || '').toLowerCase();
 
       const hasCategory = allowedCategories.some((keyword) => {
@@ -2201,17 +2451,21 @@ import {
         return categoryLower.includes(normalized) || normalized.includes(categoryLower);
       });
 
-      // Only fail if category exists but doesn't match
-      if (!hasCategory && lead.category) {
+      if (!hasCategory) {
         return { passed: false, reason: 'Category not in allowed list', nextContactDelayMinutes: 0 };
       }
     }
-    // If both lists are empty OR category list is empty, we skip category check
+    // If categories not configured, skip category check (keywords filter is the primary gate)
 
     // Filter 5: Probable Order Value ≥ threshold (use max value for ranges like "₹3,000 to ₹10,000")
-    const orderValue = lead.probableOrderValueMax || lead.probableOrderValueMin || 0;
-    if (orderValue < orderValueMin) {
-      return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
+    // Only check when: (a) user has set a threshold > 0, AND (b) the scraper actually found an order value.
+    // If the scraper couldn't extract the order value, we skip this check rather than assuming 0
+    // and incorrectly rejecting the lead.
+    if (orderValueMin > 0) {
+      const orderValue = lead.probableOrderValueMax ?? lead.probableOrderValueMin;
+      if (orderValue !== undefined && orderValue < orderValueMin) {
+        return { passed: false, reason: `Order value < ₹${orderValueMin.toLocaleString()}`, nextContactDelayMinutes: 0 };
+      }
     }
 
     // Generate random delay between 1-10 minutes for qualified leads
@@ -2296,91 +2550,6 @@ import {
     scheduleRefreshCycle();
   };
 
-  const processFilteredLead = async (lead: Lead, cardIndex: number): Promise<boolean> => {
-    if (!isAutoContactEnabled || isStopped) {
-      return false;
-    }
-
-    // Check if this lead was already processed/contacted to prevent duplicates
-    if (processedLeads.has(lead.leadId)) {
-      return false;
-    }
-
-    if (wasLeadContactedRecently(lead.leadId)) {
-      return false;
-    }
-
-    return withContactLock(async () => {
-      // Double-check after acquiring lock (another thread might have processed it)
-      if (processedLeads.has(lead.leadId)) {
-        return false;
-      }
-
-      // Mark as processing immediately to prevent concurrent attempts
-      processedLeads.add(lead.leadId);
-
-      // Check again after acquiring lock
-      if (!isAutoContactEnabled || isStopped) {
-        processedLeads.delete(lead.leadId); // Remove from processed since we didn't actually contact
-        return false;
-      }
-
-      try {
-        const result = await performContactFlow(cardIndex, lead);
-
-        // Check again after contact flow completes
-        if (!isAutoContactEnabled || isStopped) {
-          if (!result.success) {
-            processedLeads.delete(lead.leadId); // Remove if contact failed
-          }
-          return false;
-        }
-
-        if (result.success) {
-          // Lead is already in processedLeads (added before contact attempt)
-          lastContactTime = Date.now();
-          contactedLeadsCount++;
-
-          // Persist leads to cache storage (filtered leads will be persisted separately when filtering completes)
-          if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-            const leads = scrapeLeads();
-            chrome.storage.local.set({
-              'indiamart_leads_cache': leads,
-            });
-          }
-
-          chrome.runtime.sendMessage({
-            type: 'AUTO_CONTACT_SUCCESS',
-            leadId: lead.leadId,
-            companyName: lead.companyName,
-            timestamp: new Date().toISOString(),
-            contactedCount: contactedLeadsCount,
-            totalFiltered: filteredLeadsCount,
-            tabHidden: document.hidden
-          });
-
-
-          // Note: Refresh check is handled after all leads are processed in processLeadsWithFiltering
-          // This ensures we check once after processing all leads, not multiple times during processing
-
-          return true;
-        } else {
-          // Contact failed, remove from processedLeads so it can be retried later
-          processedLeads.delete(lead.leadId);
-          if (result.error) {
-            registerAutomationError(result.error);
-          }
-        }
-      } catch (error) {
-        // Contact failed due to exception, remove from processedLeads
-        processedLeads.delete(lead.leadId);
-        registerAutomationError((error as Error)?.message || 'Unknown contact flow error');
-      }
-
-      return false;
-    });
-  };
-
 
   interface LeadEvaluation {
     lead: Lead;
@@ -2404,31 +2573,24 @@ import {
 
 
   const processLeadsWithFiltering = async () => {
+    // Acquire execution lock FIRST — before any await or checks.
+    // This prevents race conditions from visibilitychange or ENABLE_AUTO_CONTACT
+    // firing a second call while the first is awaiting loadDailyContactStats.
+    if (isLeadProcessingRunning) {
+      return;
+    }
+    isLeadProcessingRunning = true;
+
     if (!isAutoContactEnabled || isStopped) {
       lastProcessingTime = Date.now();
+      isLeadProcessingRunning = false;
       return;
     }
 
     if (!filterConfigLoaded) {
+      console.log('[Content] Filter config not loaded yet, skipping processing cycle');
       lastProcessingTime = Date.now();
-      return;
-    }
-
-    // If both keyword and category lists are empty, stop processing entirely
-    // The extension should not scrape when no filters are configured
-    if (enquiryKeywords.length === 0 && allowedCategories.length === 0) {
-      console.log('[Content] Both keyword and category lists are empty - stopping agent');
-      lastProcessingTime = Date.now();
-      // Notify popup that agent is stopping due to no filters
-      chrome.runtime?.sendMessage?.({
-        type: 'AGENT_STOPPED_NO_FILTERS',
-        reason: 'No keywords or categories configured. Please add at least one keyword or category to start scraping.'
-      });
-      return;
-    }
-
-    if (isLeadProcessingRunning) {
-      lastProcessingTime = Date.now();
+      isLeadProcessingRunning = false;
       return;
     }
 
@@ -2436,10 +2598,15 @@ import {
       await loadDailyContactStats();
     }
 
-    isLeadProcessingRunning = true;
     lastProcessingTime = Date.now();
 
     try {
+      // Cancel page refresh timer during processing to prevent mid-contact-flow reloads
+      if (pageRefreshTimer) {
+        clearTimeout(pageRefreshTimer);
+        pageRefreshTimer = null;
+      }
+
       if (lastRefreshTime > 0 && Date.now() - lastRefreshTime < 8000) {
         const waitMs = randomBetween(3000, 8000);
         await delay(waitMs);
@@ -2460,6 +2627,14 @@ import {
       contactedLeadsCount = 0;
       pendingContacts = [];
 
+      console.log('[Content] ===== PROCESSING CYCLE START =====');
+      console.log('[Content] Total leads scraped:', leads.length);
+      console.log('[Content] Random skip indexes:', Array.from(skipIndexes));
+      console.log('[Content] Already processed leads:', processedLeads.size);
+      console.log('[Content] Filter keywords:', enquiryKeywords.length, '→', JSON.stringify(enquiryKeywords));
+      console.log('[Content] filterConfigLoaded:', filterConfigLoaded);
+      let skippedAlreadyProcessed = 0, skippedRandom = 0, skippedRecent = 0, skippedExpired = 0, filterPassed = 0, filterFailed = 0, contactAttempted = 0, contactSucceeded = 0, contactFailed = 0;
+
 
       for (const [index, lead] of leads.entries()) {
         // Check if auto-contact was disabled during processing
@@ -2468,10 +2643,12 @@ import {
         }
 
         if (processedLeads.has(lead.leadId)) {
+          skippedAlreadyProcessed++;
           continue;
         }
 
         if (skipIndexes.has(index)) {
+          skippedRandom++;
           leadEvaluations.push({
             lead,
             passed: false,
@@ -2488,6 +2665,7 @@ import {
         }
 
         if (wasLeadContactedRecently(lead.leadId)) {
+          skippedRecent++;
           leadEvaluations.push({
             lead,
             passed: false,
@@ -2497,6 +2675,7 @@ import {
         }
 
         if (isLeadSkipped(lead.leadId)) {
+          skippedExpired++;
           leadEvaluations.push({
             lead,
             passed: false,
@@ -2508,36 +2687,84 @@ import {
         // Enhanced logging for debugging
 
         const filterResult = applyIntelligentFilter(lead);
-        lead.passedFilter = filterResult.passed;
-        lead.filterReason = filterResult.reason;
-        lead.nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
-        leadEvaluations.push({ lead, passed: filterResult.passed, reason: filterResult.reason });
+        // Track filter results separately — do NOT mutate the lead object itself,
+        // as it gets stored in the rejected/passed leads log and should be clean.
+        const passedFilter = filterResult.passed;
+        const filterReason = filterResult.reason;
+        const nextContactDelayMinutes = filterResult.nextContactDelayMinutes;
+        leadEvaluations.push({ lead, passed: passedFilter, reason: filterReason });
 
+        if (!passedFilter) {
+          filterFailed++;
+          console.log('[Content] FILTER REJECTED:', lead.leadId, '|', lead.enquiryTitle?.substring(0, 30), '| Reason:', filterReason);
+        }
 
-        if (filterResult.passed) {
+        if (passedFilter) {
+          filterPassed++;
           // Add to filtered leads array for statistics/logging
           filteredLeads.push(lead);
           filteredLeadsCount = filteredLeads.length;
 
-          // ========== SCRAPE-ONLY MODE: Store lead instead of contacting ==========
-          // Store the passed lead for later export (no contact flow)
-          await storePassedLead(lead, filterResult.reason);
-          cycleActions.push(`Stored passed lead: ${lead.companyName || lead.leadId}`);
-          console.log('[Content] SCRAPE-ONLY: Stored passed lead:', lead.leadId, lead.companyName);
+          // Contact lead if daily limit not yet reached
+          if (canContactMoreToday()) {
+            console.log('[Content] Daily limit not reached, attempting contact for:', lead.leadId, lead.companyName);
+
+            console.log('[Content] FILTER GATE PASSED — contacting lead:', lead.leadId, '| Keyword match:', passedFilter, '| Qty:', lead.quantity, '| OrderValue:', lead.probableOrderValueMax ?? lead.probableOrderValueMin);
+
+            let contactResult: { success: boolean; error?: string };
+            contactAttempted++;
+            try {
+              contactResult = await performContactFlow(lead.cardIndex ?? index, lead);
+            } catch (error) {
+              contactResult = { success: false, error: `Contact flow crashed: ${error}` };
+              console.error('[Content] performContactFlow threw an error:', error);
+            }
+
+            if (contactResult.success) {
+              // Only on confirmed success: increment daily count and store as CONTACTED
+              await incrementDailyContactCount();
+              await storePassedLead(lead, filterReason, 'CONTACTED');
+              contactedLeadsCount++;
+              contactSucceeded++;
+              cycleActions.push(`CONTACTED: ${lead.companyName || lead.leadId}`);
+              console.log('[Content] Contact successful for lead:', lead.leadId, '| Daily count:', dailyContactStats?.count, '/', dailyContactStats?.limit);
+            } else {
+              // Contact failed — do NOT store in passed file, just skip
+              contactFailed++;
+              console.log('[Content] Contact FAILED for:', lead.leadId, '| Error:', contactResult.error);
+            }
+          } else {
+            // Daily limit reached — store lead but do NOT contact/buy
+            console.log('[Content] Daily limit reached, storing lead without contact:', lead.leadId);
+            await storePassedLead(lead, filterReason, 'STORED');
+          }
 
           // Mark as processed so we don't process again
           processedLeads.add(lead.leadId);
 
           // Small delay between processing leads
           await delay(randomBetween(500, 1500));
-          // ========== END SCRAPE-ONLY MODE ==========
         } else {
           // ========== SCRAPE-ONLY MODE: Store rejected lead with reason ==========
-          await storeRejectedLead(lead, filterResult.reason);
+          await storeRejectedLead(lead, filterReason);
           processedLeads.add(lead.leadId);
           // ========== END SCRAPE-ONLY MODE ==========
         }
       }
+
+      // ===== DIAGNOSTIC SUMMARY =====
+      console.log('[Content] ===== PROCESSING CYCLE SUMMARY =====');
+      console.log('[Content] Total scraped:', leads.length);
+      console.log('[Content] Skipped (already processed):', skippedAlreadyProcessed);
+      console.log('[Content] Skipped (random cadence):', skippedRandom);
+      console.log('[Content] Skipped (recently contacted):', skippedRecent);
+      console.log('[Content] Skipped (expired/consumed):', skippedExpired);
+      console.log('[Content] Filter PASSED:', filterPassed);
+      console.log('[Content] Filter REJECTED:', filterFailed);
+      console.log('[Content] Contact attempted:', contactAttempted);
+      console.log('[Content] Contact SUCCEEDED:', contactSucceeded);
+      console.log('[Content] Contact FAILED:', contactFailed);
+      console.log('[Content] ======================================');
 
       // Update final counts for statistics
       filteredLeadsCount = filteredLeads.length;

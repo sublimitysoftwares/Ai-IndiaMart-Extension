@@ -52,8 +52,12 @@ function inlineContentDeps(): Plugin {
           let code = contentBundle.code;
           // Strip ES module syntax from content.js itself
           code = stripEsModuleSyntax(code);
-          contentBundle.code = inlinedCode + code;
+          contentBundle.code = `(function() {\n${inlinedCode + code}\n})();`;
           contentBundle.imports = [];
+        } else {
+          let code = contentBundle.code;
+          code = stripEsModuleSyntax(code);
+          contentBundle.code = `(function() {\n${code}\n})();`;
         }
       }
     }

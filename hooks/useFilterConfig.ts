@@ -25,31 +25,29 @@ export const useFilterConfig = (filterCriteria: FilterCriteria | null, showSetti
         STORAGE_KEYS.FILTER_ORDER_VALUE
       ]);
 
-      // Load keywords - allow empty arrays (user may have cleared the list intentionally)
+      // Load keywords from storage ONLY — no hardcoded defaults
       if (Array.isArray(result[STORAGE_KEYS.FILTER_KEYWORDS])) {
-        // Storage has an array (even if empty) - use it
         setKeywords(result[STORAGE_KEYS.FILTER_KEYWORDS]);
       } else if (result[STORAGE_KEYS.FILTER_KEYWORDS] === undefined) {
-        // Key doesn't exist in storage - use defaults for first-time initialization
+        // No keywords in storage — show empty list. User must add keywords via UI.
         if (filterCriteria?.keywords && filterCriteria.keywords.length > 0) {
           setKeywords(filterCriteria.keywords);
         } else {
-          setKeywords(DEFAULT_KEYWORDS);
-          await setStorage({ [STORAGE_KEYS.FILTER_KEYWORDS]: DEFAULT_KEYWORDS });
+          setKeywords([]);
+          // DO NOT save defaults to storage — user must configure their own keywords
         }
       }
 
-      // Load categories - allow empty arrays (user may have cleared the list intentionally)
+      // Load categories from storage ONLY — no hardcoded defaults
       if (Array.isArray(result[STORAGE_KEYS.FILTER_CATEGORIES])) {
-        // Storage has an array (even if empty) - use it
         setCategories(result[STORAGE_KEYS.FILTER_CATEGORIES]);
       } else if (result[STORAGE_KEYS.FILTER_CATEGORIES] === undefined) {
-        // Key doesn't exist in storage - use defaults for first-time initialization
+        // No categories in storage — show empty list. User must add categories via UI.
         if (filterCriteria?.categories && filterCriteria.categories.length > 0) {
           setCategories(filterCriteria.categories);
         } else {
-          setCategories(DEFAULT_CATEGORIES);
-          await setStorage({ [STORAGE_KEYS.FILTER_CATEGORIES]: DEFAULT_CATEGORIES });
+          setCategories([]);
+          // DO NOT save defaults to storage — user must configure their own categories
         }
       }
 
