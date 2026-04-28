@@ -7,7 +7,7 @@ export const WORKING_HOURS = { start: 9, end: 21 }; // 9 AM – 9 PM
 export const WORKING_REFRESH_RANGE_MINUTES = { min: 5, max: 15 };
 export const OFF_HOURS_REFRESH_RANGE_MINUTES = { min: 65, max: 90 };
 
-export const MIN_LEAD_TARGET = 50;
+export const MIN_LEAD_TARGET = 75;
 export const AUTO_SCROLL_MAX_ATTEMPTS = 500;
 export const AUTO_SCROLL_DELAY_MS = 1000; // 1 second per lead
 export const AUTO_SCROLL_COOLDOWN_MS = 5 * 1000; // 5 seconds

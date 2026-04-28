@@ -1,6 +1,8 @@
 // DOM selectors used for scraping and interaction
 
 export const LEAD_CARD_SELECTORS = [
+  'div.BuyLdC_cont',
+  'div[class*="BuyLdC_cont"]',
   'div.f1.lstNw',
   'div.lstNw.lstNwDflx',
   'div.lstNw.BUY_pr',

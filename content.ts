@@ -15,7 +15,6 @@ import {
   WORKING_HOURS,
   WORKING_REFRESH_RANGE_MINUTES,
   OFF_HOURS_REFRESH_RANGE_MINUTES,
-  MIN_LEAD_TARGET,
   AUTO_SCROLL_MAX_ATTEMPTS,
   AUTO_SCROLL_DELAY_MS,
   AUTO_SCROLL_COOLDOWN_MS,
@@ -114,6 +113,7 @@ import {
   let zeroBalanceObserver: MutationObserver | null = null;
   let filterConfigLoaded = false; // Track if filter config has been loaded from storage
   let skippedLeads = new Set<string>(); // In-memory set of skipped lead IDs for fast lookups
+  const REFRESH_BASELINE_LEAD_IDS_KEY = 'indiamart_refresh_baseline_lead_ids';
   let backoffUntil = 0;
   let idlePopupCheckInterval: ReturnType<typeof setInterval> | null = null; // For idle popup watcher
   const recentErrors: number[] = [];
@@ -195,6 +195,32 @@ import {
     status?: string; // e.g., 'CONTACTED'
   }
 
+  const normalizePassedLeadKeyPart = (value?: string | number | null): string => {
+    if (value === null || value === undefined) return '';
+    return String(value).toLowerCase().replace(/\s+/g, ' ').trim();
+  };
+
+  const buildPassedLeadDedupeKey = (lead: Lead): string => {
+    const orderValueText =
+      normalizePassedLeadKeyPart(lead.probableOrderValueRaw) ||
+      [lead.probableOrderValueMin, lead.probableOrderValueMax]
+        .filter((v) => typeof v === 'number')
+        .map((v) => normalizePassedLeadKeyPart(v))
+        .join('-');
+
+    const quantityText =
+      normalizePassedLeadKeyPart(lead.quantityRaw) ||
+      normalizePassedLeadKeyPart(lead.quantity);
+
+    return [
+      normalizePassedLeadKeyPart(lead.enquiryTitle),
+      normalizePassedLeadKeyPart(lead.companyName),
+      normalizePassedLeadKeyPart(lead.location),
+      quantityText,
+      orderValueText,
+    ].join('|');
+  };
+
   // Store a lead that passed filter criteria to chrome.storage
   const storePassedLead = async (lead: Lead, filterReason: string, status?: string): Promise<void> => {
     if (typeof chrome === 'undefined' || !chrome.storage?.local) {
@@ -214,9 +240,14 @@ import {
       // Get existing logs
       const result = await chrome.storage.local.get(STORAGE_KEYS.PASSED_LEADS_LOG);
       const existingLogs: PassedLeadLog[] = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
+      const incomingDedupeKey = buildPassedLeadDedupeKey(lead);
 
-      // Check if lead already exists (by leadId)
-      const existingIndex = existingLogs.findIndex(entry => entry.lead.leadId === lead.leadId);
+      // Check if lead already exists (by leadId OR stable dedupe key)
+      const existingIndex = existingLogs.findIndex((entry) => {
+        if (entry.lead.leadId === lead.leadId) return true;
+        const existingDedupeKey = buildPassedLeadDedupeKey(entry.lead);
+        return incomingDedupeKey.length > 0 && existingDedupeKey === incomingDedupeKey;
+      });
 
       if (existingIndex !== -1) {
         // If it exists but we have a new status (e.g. was UNKNOWN, now CONTACTED), update it
@@ -815,6 +846,45 @@ import {
     }
   };
 
+  const loadRefreshBaselineLeadIds = async (): Promise<Set<string>> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return new Set<string>();
+    }
+    try {
+      const result = await chrome.storage.local.get([REFRESH_BASELINE_LEAD_IDS_KEY]);
+      const ids = result[REFRESH_BASELINE_LEAD_IDS_KEY];
+      if (!Array.isArray(ids)) return new Set<string>();
+      return new Set(ids.filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0));
+    } catch {
+      return new Set<string>();
+    }
+  };
+
+  const saveRefreshBaselineLeadIds = async (ids: Set<string>): Promise<void> => {
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return;
+    }
+    try {
+      const list = Array.from(ids).filter(Boolean);
+      if (list.length === 0) {
+        await chrome.storage.local.remove(REFRESH_BASELINE_LEAD_IDS_KEY);
+        return;
+      }
+      await chrome.storage.local.set({ [REFRESH_BASELINE_LEAD_IDS_KEY]: list });
+    } catch {
+      // best-effort only
+    }
+  };
+
+  const captureRefreshBaselineFromCurrentPage = async (): Promise<void> => {
+    const ids = new Set(
+      scrapeLeads()
+        .map((lead) => lead.leadId)
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+    );
+    await saveRefreshBaselineLeadIds(ids);
+  };
+
   // Add a lead ID to the skip list
   const addSkippedLead = async (leadId: string): Promise<void> => {
     if (!leadId || typeof leadId !== 'string') {
@@ -1123,6 +1193,68 @@ import {
     }
   };
 
+  // Dismiss final post-send success screen (IndiaMART quote panel) via close "X".
+  const dismissPostSendFinalScreen = async (): Promise<boolean> => {
+    const contexts = getInteractionContexts();
+    const containerSelectors = [
+      '.bl_quote_form',
+      'div[id^="sourcediv"]',
+      '#sld2',
+      '.rgt_side',
+    ];
+    const closeSelectors = [
+      '#cls_btn',
+      '.eqbl_del',
+      '.bl_quote_form #cls_btn',
+      '.bl_quote_form .eqbl_del',
+      '[aria-label*="close" i]',
+      '.btn-close',
+      '.modal-close',
+      '.popup-close',
+      '.close',
+    ];
+
+    for (const ctx of contexts) {
+      const containers: HTMLElement[] = [];
+      for (const selector of containerSelectors) {
+        const matches = Array.from(ctx.querySelectorAll<HTMLElement>(selector)).filter((el) => isElementVisible(el));
+        containers.push(...matches);
+      }
+
+      // Keep stable DOM order and remove duplicates
+      const uniqueContainers = Array.from(new Set(containers));
+      for (const container of uniqueContainers) {
+        for (const closeSelector of closeSelectors) {
+          const closeCandidate = container.querySelector<HTMLElement>(closeSelector);
+          if (!isElementVisible(closeCandidate)) continue;
+
+          await clickWithFallback(closeCandidate, 'Final Screen Close');
+          await delay(400);
+          if (!isElementVisible(closeCandidate)) {
+            return true;
+          }
+          // If still visible, continue trying other selectors/candidates.
+        }
+
+        // Fallback for literal "X" close controls rendered as a div/span.
+        const xCandidates = Array.from(container.querySelectorAll<HTMLElement>('div, span, button, a')).filter((el) => {
+          if (!isElementVisible(el)) return false;
+          const text = sanitize(el.textContent || '').trim();
+          return text === 'X' || text === '×';
+        });
+        for (const xCandidate of xCandidates) {
+          await clickWithFallback(xCandidate, 'Final Screen Close X');
+          await delay(400);
+          if (!isElementVisible(xCandidate)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  };
+
   const getBuyLeadBalanceEstimate = (): number | undefined => {
     if (!document.body) return undefined;
     try {
@@ -1260,11 +1392,10 @@ import {
   };
 
   const ensureMinimumLeadCards = async (
-    minCount = MIN_LEAD_TARGET,
     maxAttempts = AUTO_SCROLL_MAX_ATTEMPTS,
     delayMs = AUTO_SCROLL_DELAY_MS
   ): Promise<void> => {
-    console.log('[Content] ensureMinimumLeadCards called. minCount:', minCount, 'maxAttempts:', maxAttempts);
+    console.log('[Content] ensureMinimumLeadCards called. maxAttempts:', maxAttempts);
     const existing = getLeadCardElements().length;
     console.log('[Content] ensureMinimumLeadCards - Existing lead cards:', existing);
 
@@ -1286,9 +1417,9 @@ import {
     }
 
     const now = Date.now();
-    // Remove cooldown restriction - allow continuous scrolling
-    if (existing >= minCount && now - lastAutoScrollRun < AUTO_SCROLL_COOLDOWN_MS) {
-      console.log('[Content] ensureMinimumLeadCards - Skipping due to cooldown or enough leads');
+    // Keep cooldown guard to avoid thrashing the page with repeated immediate scroll loops.
+    if (now - lastAutoScrollRun < AUTO_SCROLL_COOLDOWN_MS) {
+      console.log('[Content] ensureMinimumLeadCards - Skipping due to cooldown');
       return;
     }
     lastAutoScrollRun = now;
@@ -1383,11 +1514,6 @@ import {
         }
       }
 
-      // Continue scrolling if button not found yet
-      if (!showMoreButtonFound && currentCount >= minCount) {
-        // We have enough leads, but still scroll until we find the button
-      }
-
       // Track progress - continue scrolling even if no progress for a while
       if (currentCount > previousCount) {
         noProgressCount = 0; // Reset no progress counter
@@ -1395,7 +1521,6 @@ import {
         noProgressCount++;
 
         // HARD EXIT: If no new leads loaded after 15 consecutive attempts, stop scrolling.
-        // This prevents infinite scrolling when IndiaMart has fewer leads than MIN_LEAD_TARGET.
         if (noProgressCount >= 15) {
           console.log('[Content] ensureMinimumLeadCards - No progress after 15 attempts, stopping scroll. Current count:', currentCount);
           break;
@@ -1421,13 +1546,13 @@ import {
 
     const finalCount = getLeadCardElements().length;
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
-
-    // Don't refresh immediately - wait for 30 second refresh cycle
-    if (finalCount >= minCount && isAutoContactEnabled && !isStopped) {
-    }
+    console.log('[Content] ensureMinimumLeadCards complete. finalCount:', finalCount, 'elapsedSeconds:', elapsedTime);
   };
 
-  const buildLeadId = (card: Element, index: number, title: string, timestamp: string): string => {
+  const normalizeLeadIdPart = (value?: string | null): string =>
+    sanitizeOptional(value)?.toLowerCase().replace(/\s+/g, ' ').trim() || '';
+
+  const buildLeadId = (card: Element, _index: number, title: string, timestamp: string): string => {
     const attrId = card.getAttribute('data-lead-id');
     if (attrId) return attrId;
 
@@ -1436,20 +1561,92 @@ import {
       getInputValue(card, 'input[name="gridParam"], input[name^="gridParam"], input[id^="gridParam"]');
     if (hiddenId) return hiddenId;
 
-    return `${index}-${title || 'lead'}-${timestamp || 'time'}`.replace(/\s+/g, '-');
+    const explicitCardId = card.getAttribute('id');
+    // BLCard<number> is position-like and can be reused after refresh; avoid using it as stable identity.
+    if (explicitCardId && !/^BLCard\d+$/i.test(explicitCardId)) {
+      return explicitCardId;
+    }
+
+    const positionId = card.getAttribute('position');
+    const companyFromCard =
+      card.querySelector('p.bl-compNm, .company-name, .BuyLdC_cont .buyer-name, .BuyLdC_cont .BuyLdC_byrNm')?.textContent ||
+      getInputValue(card, 'input[name="companyname"], input[id^="companyname"], input[name^="companyname"]');
+    const locationFromCard =
+      card.querySelector('li[title="Location"] span, .location, .city_click, .state_click')?.textContent ||
+      getInputValue(card, 'input[id^="card_city"], input[name^="card_city"]') ||
+      getInputValue(card, 'input[id^="card_state"], input[name^="card_state"]');
+    const quantityFromCard =
+      getInputValue(card, 'input[name="qty"], input[id^="qty"], input[name^="qty"]') ||
+      card.querySelector('.bl-qty, [class*="quantity"], li[title="Quantity"]')?.textContent;
+    const orderValueFromCard =
+      getInputValue(card, 'input[name="ordervalue"], input[id^="ordervalue"], input[name^="ordervalue"]') ||
+      card.querySelector('li[title="Probable Order Value"], li[title="Order Value"]')?.textContent;
+
+    const fingerprintParts = [
+      normalizeLeadIdPart(title),
+      normalizeLeadIdPart(timestamp),
+      normalizeLeadIdPart(companyFromCard),
+      normalizeLeadIdPart(locationFromCard),
+      normalizeLeadIdPart(quantityFromCard),
+      normalizeLeadIdPart(orderValueFromCard),
+      normalizeLeadIdPart(positionId && !card.classList.contains('BuyLdC_cont') ? positionId : ''),
+    ].filter(Boolean);
+
+    if (fingerprintParts.length > 0) {
+      return `fp-${fingerprintParts.join('|')}`;
+    }
+
+    return `fp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  };
+
+  const cleanLocationFragment = (value?: string | null): string => {
+    const raw = sanitizeOptional(value) || '';
+    if (!raw) return '';
+
+    return raw
+      // Handle glued artifact pattern: "SuratClick here..."
+      .replace(/([A-Za-z])Click\s+here/gi, '$1 Click here')
+      // Remove CTA/tooltip text that gets appended by IndiaMART location links.
+      .replace(/Click\s+here\s+to\s+view\s+BuyLeads\s+from[\s\S]*$/i, '')
+      .replace(/\s+/g, ' ')
+      .replace(/^[,\s]+|[,\s]+$/g, '')
+      .trim();
   };
 
   const extractLead = (card: Element, index: number): Lead => {
-    const primaryTitle = sanitizeOptional(card.querySelector('h1, h2, h3, .bl-title, .enquiry-title')?.textContent);
+    const getLabeledDetailValue = (labels: string[]): string | undefined => {
+      const normalizedLabels = labels.map((label) => label.trim().toLowerCase());
+      const detailRows = Array.from(card.querySelectorAll<HTMLElement>('li.BuyLdC_isqdet, li.BuyLdC_isqByrDtls'));
+      for (const row of detailRows) {
+        const labelEl = row.querySelector('span.SLC_c0, span');
+        const valueEl = row.querySelector('strong, span.SLC_fwb, span:not(.SLC_c0)');
+        const labelText = sanitize(labelEl?.textContent).toLowerCase();
+        if (!labelText) continue;
+        if (normalizedLabels.some((candidate) => labelText === candidate || labelText.includes(candidate))) {
+          const valueText = sanitizeOptional(valueEl?.textContent) || sanitizeOptional(row.textContent);
+          if (valueText) {
+            const cleaned = valueText.replace(new RegExp(`^${labelText}\\s*:?\\s*`, 'i'), '').trim();
+            return cleaned || valueText;
+          }
+        }
+      }
+      return undefined;
+    };
+
+    const primaryTitle = sanitizeOptional(
+      card.querySelector('h1, h2, h3, .bl-title, .enquiry-title, .BuyLdC_m6, .BuyLdC_cont .SLC_f18.SLC_fwb')?.textContent
+    );
     const ofrTitle = getInputValue(card, 'input[name="ofrtitle"], input[id^="ofrtitle"], input[name^="ofrtitle"]');
 
     const companyName =
-      sanitizeOptional(card.querySelector('p.bl-compNm, .company-name')?.textContent) ||
+      sanitizeOptional(card.querySelector('p.bl-compNm, .company-name, .BuyLdC_cont .buyer-name, .BuyLdC_cont .BuyLdC_byrNm')?.textContent) ||
+      getLabeledDetailValue(['Company', 'Company Name', 'Buyer']) ||
       sanitizeOptional(card.querySelector('.lstNwRgtBD .alignBox b, .lstNwRgtBD .buyer-name')?.textContent) ||
       'N/A';
 
     const requirement =
       sanitizeOptional(card.querySelector('p.bl-enq-comp, .requirement')?.textContent) ||
+      getLabeledDetailValue(['Application', 'Requirement']) ||
       ofrTitle ||
       primaryTitle ||
       'No requirement specified.';
@@ -1461,10 +1658,10 @@ import {
       // Clone element and remove tooltip spans before extracting text
       const cityClone = cityElement.cloneNode(true) as HTMLElement;
       cityClone.querySelectorAll('.stltips').forEach(el => el.remove());
-      city = sanitizeOptional(cityClone.textContent) || '';
+      city = cleanLocationFragment(cityClone.textContent);
     }
     // Fallback to input value if not found
-    city = city || getInputValue(card, 'input[id^="card_city"], input[name^="card_city"]') || '';
+    city = city || cleanLocationFragment(getInputValue(card, 'input[id^="card_city"], input[name^="card_city"]'));
 
     // Extract state - exclude nested tooltip spans (.stltips)
     const stateElement = card.querySelector('.lstNwLftLoc .state_click, .state_click');
@@ -1473,10 +1670,20 @@ import {
       // Clone element and remove tooltip spans before extracting text
       const stateClone = stateElement.cloneNode(true) as HTMLElement;
       stateClone.querySelectorAll('.stltips').forEach(el => el.remove());
-      state = sanitizeOptional(stateClone.textContent) || '';
+      state = cleanLocationFragment(stateClone.textContent);
     }
     // Fallback to input value if not found
-    state = state || getInputValue(card, 'input[id^="card_state"], input[name^="card_state"]') || '';
+    state = state || cleanLocationFragment(getInputValue(card, 'input[id^="card_state"], input[name^="card_state"]'));
+
+    if (!city || !state) {
+      const cityStateNodes = Array.from(card.querySelectorAll<HTMLElement>('.BuyLdC_time_loc .SLC_dflx.SLC_aic.SLC_gap5 strong.SLC_c2'));
+      if (!city && cityStateNodes[0]) {
+        city = cleanLocationFragment(cityStateNodes[0].textContent) || city;
+      }
+      if (!state && cityStateNodes[1]) {
+        state = cleanLocationFragment(cityStateNodes[1].textContent) || state;
+      }
+    }
 
     // Try to get location from dedicated location element, but filter out tooltip text
     const locationElement = card.querySelector('li[title="Location"] span, .location');
@@ -1491,6 +1698,7 @@ import {
         .replace(/Click here to view BuyLeads from[^]*?$/gi, '')
         .replace(/Click here[^]*?$/gi, '')
         .trim();
+      locationText = cleanLocationFragment(locationText);
 
       // If text still contains tooltip keywords or is too long, prefer city+state combination
       if (locationText.includes('Click here') ||
@@ -1508,17 +1716,20 @@ import {
     const offerDate = getInputValue(card, 'input[name="offerdate"], input[id^="offerdate"], input[id^="ofrdate"], input[name^="ofrdate"]');
     const timestamp =
       offerDate ||
+      sanitizeOptional(card.querySelector('.BuyLdC_time_loc .MrLdsB_m1 strong')?.textContent) ||
       sanitizeOptional(card.querySelector('li[title="Date"] span, time, .date, .lstNwLftLoc strong')?.textContent) ||
       'N/A';
 
     const quantityText =
       getTableValue(card as HTMLElement, 'Quantity') ||
+      getLabeledDetailValue(['Quantity']) ||
       sanitizeOptional(card.querySelector('.bl-qty, [class*="quantity"], li[title="Quantity"], li:has(span.bl-qty)')?.textContent);
     const quantityMatch = card.textContent?.match(/Quantity\s*[:\-]?\s*([\d.,]+)/i);
     const quantityInfo = parseQuantity(quantityText || quantityMatch?.[1]);
 
     const categoryText =
       sanitizeOptional(card.querySelector('li[title="I am interested in"], .bl-interest, .bl-category a, .bl-category span')?.textContent) ||
+      sanitizeOptional(card.querySelector('#breadcrum_pmcat_div span[title], .BuyLdC_Mcat span[title]')?.textContent) ||
       getInputValue(card, 'input[name="mcatname"], input[id^="mcatname"], input[name^="mcatname"]') ||
       undefined;
 
@@ -1541,6 +1752,7 @@ import {
     let orderValueText =
       getTableValue(card as HTMLElement, 'Probable Order Value') ||
       getTableValue(card as HTMLElement, 'Order Value') ||
+      getLabeledDetailValue(['Order Value', 'Probable Order Value']) ||
       sanitizeOptional(orderValueNode?.textContent);
     // Fallback: search <li> elements by text content (same pattern as fabric scraping)
     if (!orderValueText) {
@@ -2069,6 +2281,10 @@ import {
       return { success: false, error: validationError || 'Send Reply confirmation not detected.' };
     }
 
+    // Best-effort: close the final quote success screen if IndiaMART shows it.
+    // This keeps the existing flow moving without altering send success behavior.
+    await dismissPostSendFinalScreen();
+
     // Contact successful - update history
     const leadDetails = lead || (card ? extractLead(card, cardIndex) : undefined);
     if (leadDetails && leadDetails.leadId) {
@@ -2403,8 +2619,8 @@ import {
     } else {
       // Extract state from location (format: "City, State" or just "State")
       // Split by comma and get the last part (state)
-      const locationParts = location.split(',').map(part => part.trim());
-      const state = locationParts[locationParts.length - 1]; // Get last part (state)
+      const locationParts = location.split(',').map(part => cleanLocationFragment(part));
+      const state = cleanLocationFragment(locationParts[locationParts.length - 1]); // Get last part (state)
 
       // Check if state matches any Indian state (case-insensitive)
       const stateLower = state.toLowerCase();
@@ -2534,8 +2750,9 @@ import {
     const delayMs = getStealthDelayMs();
     lastScheduledRefreshWindow = `${(delayMs / 1000).toFixed(0)}s`;
 
-    pageRefreshTimer = setTimeout(() => {
+    pageRefreshTimer = setTimeout(async () => {
       if (!isStopped && isAutoContactEnabled) {
+        await captureRefreshBaselineFromCurrentPage();
         lastRefreshTime = Date.now();
         window.location.reload();
       }
@@ -2613,10 +2830,12 @@ import {
       }
 
       // Scroll until "Show More Suggested Leads" button is visible (don't click it)
-      await ensureMinimumLeadCards(MIN_LEAD_TARGET);
+      await ensureMinimumLeadCards();
 
       // Process ALL leads available on the page (not limited to 50)
       const leads = scrapeLeads();
+      const refreshBaselineLeadIds = await loadRefreshBaselineLeadIds();
+      let discoveredLeadOutsideRefreshBaseline = false;
       const skipIndexes = pickRandomSkipIndexes(leads.length);
       const filteredLeads: Lead[] = [];
       const leadEvaluations: LeadEvaluation[] = [];
@@ -2633,7 +2852,7 @@ import {
       console.log('[Content] Already processed leads:', processedLeads.size);
       console.log('[Content] Filter keywords:', enquiryKeywords.length, '→', JSON.stringify(enquiryKeywords));
       console.log('[Content] filterConfigLoaded:', filterConfigLoaded);
-      let skippedAlreadyProcessed = 0, skippedRandom = 0, skippedRecent = 0, skippedExpired = 0, filterPassed = 0, filterFailed = 0, contactAttempted = 0, contactSucceeded = 0, contactFailed = 0;
+      let skippedAlreadyProcessed = 0, skippedRandom = 0, skippedRecent = 0, skippedExpired = 0, skippedRefreshBaseline = 0, filterPassed = 0, filterFailed = 0, contactAttempted = 0, contactSucceeded = 0, contactFailed = 0;
 
 
       for (const [index, lead] of leads.entries()) {
@@ -2646,6 +2865,12 @@ import {
           skippedAlreadyProcessed++;
           continue;
         }
+
+        if (refreshBaselineLeadIds.has(lead.leadId)) {
+          skippedRefreshBaseline++;
+          continue;
+        }
+        discoveredLeadOutsideRefreshBaseline = true;
 
         if (skipIndexes.has(index)) {
           skippedRandom++;
@@ -2756,6 +2981,7 @@ import {
       console.log('[Content] ===== PROCESSING CYCLE SUMMARY =====');
       console.log('[Content] Total scraped:', leads.length);
       console.log('[Content] Skipped (already processed):', skippedAlreadyProcessed);
+      console.log('[Content] Skipped (seen before refresh):', skippedRefreshBaseline);
       console.log('[Content] Skipped (random cadence):', skippedRandom);
       console.log('[Content] Skipped (recently contacted):', skippedRecent);
       console.log('[Content] Skipped (expired/consumed):', skippedExpired);
@@ -2822,6 +3048,10 @@ import {
 
       const noLeadsRemainToContact = remainingContactableLeads === 0;
 
+      if (refreshBaselineLeadIds.size > 0 && discoveredLeadOutsideRefreshBaseline) {
+        await saveRefreshBaselineLeadIds(new Set<string>());
+      }
+
       if ((noLeadsPassedFilters || allFilteredLeadsContacted || noLeadsRemainToContact) &&
         isAutoContactEnabled &&
         !isStopped) {
@@ -2835,6 +3065,7 @@ import {
         lastRefreshTime = Date.now();
         console.log('[Content] Cycle complete. Waiting 2 minutes before reload...');
         await delay(120000);
+        await captureRefreshBaselineFromCurrentPage();
         window.location.reload();
         return; // Exit early since page will reload
       }
@@ -2882,7 +3113,7 @@ import {
 
     if (message.type === 'SCRAPE_NOW') {
       console.log('[Content] SCRAPE_NOW - Starting ensureMinimumLeadCards...');
-      ensureMinimumLeadCards(MIN_LEAD_TARGET)
+      ensureMinimumLeadCards()
         .catch((error) => {
           console.error('[Content] Auto-scroll failed before SCRAPE_NOW:', error);
         })
@@ -3059,7 +3290,7 @@ import {
 
       attempts += 1;
       console.log('[Content] startScrapeLoop - Attempt', attempts, ', calling ensureMinimumLeadCards...');
-      ensureMinimumLeadCards(MIN_LEAD_TARGET)
+      ensureMinimumLeadCards()
         .catch((error) => {
           console.error('[Content] Auto-scroll failed during initial scrape:', error);
         })
