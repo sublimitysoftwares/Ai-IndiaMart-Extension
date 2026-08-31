@@ -200,7 +200,111 @@ import {
     return String(value).toLowerCase().replace(/\s+/g, ' ').trim();
   };
 
-  const buildPassedLeadDedupeKey = (lead: Lead): string => {
+  const md5 = (input: string): string => {
+    // MD5 helper for deterministic lead-key hashing.
+    const rotateLeft = (value: number, amount: number) => (value << amount) | (value >>> (32 - amount));
+    const addUnsigned = (x: number, y: number) => {
+      const x4 = x & 0x40000000;
+      const y4 = y & 0x40000000;
+      const x8 = x & 0x80000000;
+      const y8 = y & 0x80000000;
+      const result = (x & 0x3fffffff) + (y & 0x3fffffff);
+      if (x4 & y4) return result ^ 0x80000000 ^ x8 ^ y8;
+      if (x4 | y4) {
+        if (result & 0x40000000) return result ^ 0xc0000000 ^ x8 ^ y8;
+        return result ^ 0x40000000 ^ x8 ^ y8;
+      }
+      return result ^ x8 ^ y8;
+    };
+    const f = (x: number, y: number, z: number) => (x & y) | (~x & z);
+    const g = (x: number, y: number, z: number) => (x & z) | (y & ~z);
+    const h = (x: number, y: number, z: number) => x ^ y ^ z;
+    const i = (x: number, y: number, z: number) => y ^ (x | ~z);
+    const ff = (a: number, b: number, c: number, d: number, x: number, s: number, ac: number) =>
+      addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, f(b, c, d)), addUnsigned(x, ac)), s), b);
+    const gg = (a: number, b: number, c: number, d: number, x: number, s: number, ac: number) =>
+      addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, g(b, c, d)), addUnsigned(x, ac)), s), b);
+    const hh = (a: number, b: number, c: number, d: number, x: number, s: number, ac: number) =>
+      addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, h(b, c, d)), addUnsigned(x, ac)), s), b);
+    const ii = (a: number, b: number, c: number, d: number, x: number, s: number, ac: number) =>
+      addUnsigned(rotateLeft(addUnsigned(addUnsigned(a, i(b, c, d)), addUnsigned(x, ac)), s), b);
+    const utf8 = unescape(encodeURIComponent(input));
+    const wordArray: number[] = [];
+    for (let index = 0; index < utf8.length * 8; index += 8) {
+      wordArray[index >> 5] |= (utf8.charCodeAt(index / 8) & 0xff) << (index % 32);
+    }
+    wordArray[(utf8.length >> 2)] |= 0x80 << ((utf8.length % 4) * 8);
+    wordArray[(((utf8.length + 8) >> 6) + 1) * 16 - 2] = utf8.length * 8;
+    let a = 0x67452301;
+    let b = 0xefcdab89;
+    let c = 0x98badcfe;
+    let d = 0x10325476;
+    for (let k = 0; k < wordArray.length; k += 16) {
+      const aa = a;
+      const bb = b;
+      const cc = c;
+      const dd = d;
+      a = ff(a, b, c, d, wordArray[k + 0] || 0, 7, 0xd76aa478); d = ff(d, a, b, c, wordArray[k + 1] || 0, 12, 0xe8c7b756);
+      c = ff(c, d, a, b, wordArray[k + 2] || 0, 17, 0x242070db); b = ff(b, c, d, a, wordArray[k + 3] || 0, 22, 0xc1bdceee);
+      a = ff(a, b, c, d, wordArray[k + 4] || 0, 7, 0xf57c0faf); d = ff(d, a, b, c, wordArray[k + 5] || 0, 12, 0x4787c62a);
+      c = ff(c, d, a, b, wordArray[k + 6] || 0, 17, 0xa8304613); b = ff(b, c, d, a, wordArray[k + 7] || 0, 22, 0xfd469501);
+      a = ff(a, b, c, d, wordArray[k + 8] || 0, 7, 0x698098d8); d = ff(d, a, b, c, wordArray[k + 9] || 0, 12, 0x8b44f7af);
+      c = ff(c, d, a, b, wordArray[k + 10] || 0, 17, 0xffff5bb1); b = ff(b, c, d, a, wordArray[k + 11] || 0, 22, 0x895cd7be);
+      a = ff(a, b, c, d, wordArray[k + 12] || 0, 7, 0x6b901122); d = ff(d, a, b, c, wordArray[k + 13] || 0, 12, 0xfd987193);
+      c = ff(c, d, a, b, wordArray[k + 14] || 0, 17, 0xa679438e); b = ff(b, c, d, a, wordArray[k + 15] || 0, 22, 0x49b40821);
+      a = gg(a, b, c, d, wordArray[k + 1] || 0, 5, 0xf61e2562); d = gg(d, a, b, c, wordArray[k + 6] || 0, 9, 0xc040b340);
+      c = gg(c, d, a, b, wordArray[k + 11] || 0, 14, 0x265e5a51); b = gg(b, c, d, a, wordArray[k + 0] || 0, 20, 0xe9b6c7aa);
+      a = gg(a, b, c, d, wordArray[k + 5] || 0, 5, 0xd62f105d); d = gg(d, a, b, c, wordArray[k + 10] || 0, 9, 0x02441453);
+      c = gg(c, d, a, b, wordArray[k + 15] || 0, 14, 0xd8a1e681); b = gg(b, c, d, a, wordArray[k + 4] || 0, 20, 0xe7d3fbc8);
+      a = gg(a, b, c, d, wordArray[k + 9] || 0, 5, 0x21e1cde6); d = gg(d, a, b, c, wordArray[k + 14] || 0, 9, 0xc33707d6);
+      c = gg(c, d, a, b, wordArray[k + 3] || 0, 14, 0xf4d50d87); b = gg(b, c, d, a, wordArray[k + 8] || 0, 20, 0x455a14ed);
+      a = gg(a, b, c, d, wordArray[k + 13] || 0, 5, 0xa9e3e905); d = gg(d, a, b, c, wordArray[k + 2] || 0, 9, 0xfcefa3f8);
+      c = gg(c, d, a, b, wordArray[k + 7] || 0, 14, 0x676f02d9); b = gg(b, c, d, a, wordArray[k + 12] || 0, 20, 0x8d2a4c8a);
+      a = hh(a, b, c, d, wordArray[k + 5] || 0, 4, 0xfffa3942); d = hh(d, a, b, c, wordArray[k + 8] || 0, 11, 0x8771f681);
+      c = hh(c, d, a, b, wordArray[k + 11] || 0, 16, 0x6d9d6122); b = hh(b, c, d, a, wordArray[k + 14] || 0, 23, 0xfde5380c);
+      a = hh(a, b, c, d, wordArray[k + 1] || 0, 4, 0xa4beea44); d = hh(d, a, b, c, wordArray[k + 4] || 0, 11, 0x4bdecfa9);
+      c = hh(c, d, a, b, wordArray[k + 7] || 0, 16, 0xf6bb4b60); b = hh(b, c, d, a, wordArray[k + 10] || 0, 23, 0xbebfbc70);
+      a = hh(a, b, c, d, wordArray[k + 13] || 0, 4, 0x289b7ec6); d = hh(d, a, b, c, wordArray[k + 0] || 0, 11, 0xeaa127fa);
+      c = hh(c, d, a, b, wordArray[k + 3] || 0, 16, 0xd4ef3085); b = hh(b, c, d, a, wordArray[k + 6] || 0, 23, 0x04881d05);
+      a = hh(a, b, c, d, wordArray[k + 9] || 0, 4, 0xd9d4d039); d = hh(d, a, b, c, wordArray[k + 12] || 0, 11, 0xe6db99e5);
+      c = hh(c, d, a, b, wordArray[k + 15] || 0, 16, 0x1fa27cf8); b = hh(b, c, d, a, wordArray[k + 2] || 0, 23, 0xc4ac5665);
+      a = ii(a, b, c, d, wordArray[k + 0] || 0, 6, 0xf4292244); d = ii(d, a, b, c, wordArray[k + 7] || 0, 10, 0x432aff97);
+      c = ii(c, d, a, b, wordArray[k + 14] || 0, 15, 0xab9423a7); b = ii(b, c, d, a, wordArray[k + 5] || 0, 21, 0xfc93a039);
+      a = ii(a, b, c, d, wordArray[k + 12] || 0, 6, 0x655b59c3); d = ii(d, a, b, c, wordArray[k + 3] || 0, 10, 0x8f0ccc92);
+      c = ii(c, d, a, b, wordArray[k + 10] || 0, 15, 0xffeff47d); b = ii(b, c, d, a, wordArray[k + 1] || 0, 21, 0x85845dd1);
+      a = ii(a, b, c, d, wordArray[k + 8] || 0, 6, 0x6fa87e4f); d = ii(d, a, b, c, wordArray[k + 15] || 0, 10, 0xfe2ce6e0);
+      c = ii(c, d, a, b, wordArray[k + 6] || 0, 15, 0xa3014314); b = ii(b, c, d, a, wordArray[k + 13] || 0, 21, 0x4e0811a1);
+      a = ii(a, b, c, d, wordArray[k + 4] || 0, 6, 0xf7537e82); d = ii(d, a, b, c, wordArray[k + 11] || 0, 10, 0xbd3af235);
+      c = ii(c, d, a, b, wordArray[k + 2] || 0, 15, 0x2ad7d2bb); b = ii(b, c, d, a, wordArray[k + 9] || 0, 21, 0xeb86d391);
+      a = addUnsigned(a, aa);
+      b = addUnsigned(b, bb);
+      c = addUnsigned(c, cc);
+      d = addUnsigned(d, dd);
+    }
+    const toHex = (value: number) => {
+      let hex = '';
+      for (let j = 0; j <= 3; j++) {
+        hex += (`0${((value >> (j * 8)) & 0xff).toString(16)}`).slice(-2);
+      }
+      return hex;
+    };
+    return (toHex(a) + toHex(b) + toHex(c) + toHex(d)).toLowerCase();
+  };
+
+  const normalizeLeadIdForLogDedupe = (leadId?: string): string => {
+    const normalized = normalizePassedLeadKeyPart(leadId);
+    if (!normalized) return '';
+    // fp- IDs may include relative-time suffixes like "|5 mins ago"; strip only the volatile suffix.
+    return normalized.replace(/\|\s*\d+\s*(sec|secs|second|seconds|min|mins|minute|minutes|hr|hrs|hour|hours)\s*ago$/i, '');
+  };
+
+  const buildStableLeadLogKeys = (lead: Lead): string[] => {
+    const stableLeadId = normalizeLeadIdForLogDedupe(lead.leadId);
+    const looksStableId = stableLeadId && !stableLeadId.startsWith('fp-');
+    if (looksStableId) {
+      return [`id:${stableLeadId}`];
+    }
+
     const orderValueText =
       normalizePassedLeadKeyPart(lead.probableOrderValueRaw) ||
       [lead.probableOrderValueMin, lead.probableOrderValueMax]
@@ -212,13 +316,42 @@ import {
       normalizePassedLeadKeyPart(lead.quantityRaw) ||
       normalizePassedLeadKeyPart(lead.quantity);
 
-    return [
-      normalizePassedLeadKeyPart(lead.enquiryTitle),
-      normalizePassedLeadKeyPart(lead.companyName),
-      normalizePassedLeadKeyPart(lead.location),
-      quantityText,
-      orderValueText,
-    ].join('|');
+    const title = normalizePassedLeadKeyPart(lead.enquiryTitle);
+    const company = normalizePassedLeadKeyPart(lead.companyName);
+    const location = normalizePassedLeadKeyPart(lead.location);
+    const canonicalPayload = {
+      enquiryTitle: title,
+      companyName: company,
+      location,
+      quantity: quantityText,
+      orderValue: orderValueText,
+    };
+    const compactCanonical = JSON.stringify(canonicalPayload);
+    const md5Key = `md5:${md5(compactCanonical)}`;
+
+    const contentOnlyPayload = {
+      enquiryTitle: title,
+      location,
+      quantity: quantityText,
+      orderValue: orderValueText,
+    };
+    const compactContent = JSON.stringify(contentOnlyPayload);
+    const md5cKey = `md5c:${md5(compactContent)}`;
+
+    const hasMeaningfulCompact = (compact: string) =>
+      compact.replace(/[\{\}\":,]/g, '').trim().length > 0;
+
+    const keys: string[] = [];
+    if (hasMeaningfulCompact(compactCanonical)) {
+      keys.push(md5Key);
+    }
+    if (hasMeaningfulCompact(compactContent)) {
+      keys.push(md5cKey);
+    }
+    if (stableLeadId) {
+      keys.push(`id:${stableLeadId}`);
+    }
+    return keys;
   };
 
   // Store a lead that passed filter criteria to chrome.storage
@@ -240,13 +373,13 @@ import {
       // Get existing logs
       const result = await chrome.storage.local.get(STORAGE_KEYS.PASSED_LEADS_LOG);
       const existingLogs: PassedLeadLog[] = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
-      const incomingDedupeKey = buildPassedLeadDedupeKey(lead);
+      const incomingDedupeKeys = new Set(buildStableLeadLogKeys(lead));
 
       // Check if lead already exists (by leadId OR stable dedupe key)
       const existingIndex = existingLogs.findIndex((entry) => {
         if (entry.lead.leadId === lead.leadId) return true;
-        const existingDedupeKey = buildPassedLeadDedupeKey(entry.lead);
-        return incomingDedupeKey.length > 0 && existingDedupeKey === incomingDedupeKey;
+        const existingDedupeKeys = buildStableLeadLogKeys(entry.lead);
+        return existingDedupeKeys.some((key) => incomingDedupeKeys.has(key));
       });
 
       if (existingIndex !== -1) {
@@ -312,8 +445,14 @@ import {
       const result = await chrome.storage.local.get(STORAGE_KEYS.REJECTED_LEADS_LOG);
       const existingLogs: RejectedLeadLog[] = result[STORAGE_KEYS.REJECTED_LEADS_LOG] || [];
 
-      // Check if lead already exists (by leadId)
-      const alreadyExists = existingLogs.some(entry => entry.lead.leadId === lead.leadId);
+      const incomingDedupeKeys = new Set(buildStableLeadLogKeys(lead));
+
+      // Check if lead already exists (by leadId OR stable dedupe key)
+      const alreadyExists = existingLogs.some((entry) => {
+        if (entry.lead.leadId === lead.leadId) return true;
+        const existingDedupeKeys = buildStableLeadLogKeys(entry.lead);
+        return existingDedupeKeys.some((key) => incomingDedupeKeys.has(key));
+      });
       if (alreadyExists) {
         return;
       }
@@ -2316,8 +2455,8 @@ import {
   // Validation and date utilities imported from utils/
 
   const determineDailyLimit = (_dayOfWeek: number): number => {
-    // Phase 2: Max 10 contacts per day
-    return 10;
+    // Phase 2: Max 6 contacts per day
+    return 6;
   };
 
   const initializeDailyStats = (): DailyContactStats => {
@@ -2355,6 +2494,11 @@ import {
         const fresh = initializeDailyStats();
         await saveDailyContactStats(fresh);
       } else {
+        const nextLimit = determineDailyLimit(stats.dayOfWeek);
+        if (stats.limit !== nextLimit) {
+          stats.limit = nextLimit;
+          await saveDailyContactStats(stats);
+        }
         dailyContactStats = stats;
       }
     } catch (error) {
