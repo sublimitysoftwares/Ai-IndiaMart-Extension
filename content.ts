@@ -1016,10 +1016,12 @@ import {
   };
 
   const captureRefreshBaselineFromCurrentPage = async (): Promise<void> => {
+    // Only remember leads that were actually evaluated; leads that were randomly skipped
+    // or not reached yet must be evaluated after the refresh instead of being skipped forever.
     const ids = new Set(
       scrapeLeads()
         .map((lead) => lead.leadId)
-        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0)
+        .filter((id): id is string => typeof id === 'string' && id.trim().length > 0 && processedLeads.has(id))
     );
     await saveRefreshBaselineLeadIds(ids);
   };
@@ -1691,9 +1693,21 @@ import {
   const normalizeLeadIdPart = (value?: string | null): string =>
     sanitizeOptional(value)?.toLowerCase().replace(/\s+/g, ' ').trim() || '';
 
-  const buildLeadId = (card: Element, _index: number, title: string, timestamp: string): string => {
+  const buildLeadId = (
+    card: Element,
+    _index: number,
+    title: string,
+    timestamp: string,
+    city = '',
+    state = '',
+    category = ''
+  ): string => {
     const attrId = card.getAttribute('data-lead-id');
     if (attrId) return attrId;
+
+    // Current layout: IndiaMART's lead ID sits on the card's "Contact Buyer Now" button.
+    const nestedAttrId = sanitizeOptional(card.querySelector('[data-lead-id]')?.getAttribute('data-lead-id'));
+    if (nestedAttrId) return nestedAttrId;
 
     const hiddenId =
       getInputValue(card, 'input[name="ofrid"], input[id^="ofrid"], input[name^="ofrid"]') ||
@@ -1721,21 +1735,34 @@ import {
       getInputValue(card, 'input[name="ordervalue"], input[id^="ordervalue"], input[name^="ordervalue"]') ||
       card.querySelector('li[title="Probable Order Value"], li[title="Order Value"]')?.textContent;
 
+    // Relative times ("2 hrs ago") change on every refresh, so they must not be part of the identity.
+    const stableTimestamp = /\bago\b/i.test(timestamp) ? '' : timestamp;
+    // ISQ detail rows (e.g. "Quantity : 100 Meter", "Material : Cotton") distinguish leads that share a title.
+    const isqDetails = Array.from(card.querySelectorAll('li.BuyLdC_isqdet'))
+      .map((row) => normalizeLeadIdPart(row.textContent))
+      .filter(Boolean)
+      .join(';');
+
     const fingerprintParts = [
       normalizeLeadIdPart(title),
-      normalizeLeadIdPart(timestamp),
+      normalizeLeadIdPart(stableTimestamp),
       normalizeLeadIdPart(companyFromCard),
       normalizeLeadIdPart(locationFromCard),
+      normalizeLeadIdPart(city),
+      normalizeLeadIdPart(state),
+      normalizeLeadIdPart(category),
       normalizeLeadIdPart(quantityFromCard),
       normalizeLeadIdPart(orderValueFromCard),
+      isqDetails,
       normalizeLeadIdPart(positionId && !card.classList.contains('BuyLdC_cont') ? positionId : ''),
     ].filter(Boolean);
 
     if (fingerprintParts.length > 0) {
-      return `fp-${fingerprintParts.join('|')}`;
+      return `fp-${md5(fingerprintParts.join('|'))}`;
     }
 
-    return `fp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    // Deterministic last resort so the same card always maps to the same ID.
+    return `fp-${md5(normalizeLeadIdPart(card.textContent))}`;
   };
 
   const cleanLocationFragment = (value?: string | null): string => {
@@ -1773,6 +1800,7 @@ import {
     };
 
     const primaryTitle = sanitizeOptional(
+      card.querySelector('span.BLbp_title')?.textContent ||
       card.querySelector('h1, h2, h3, .bl-title, .enquiry-title, .BuyLdC_m6, .BuyLdC_cont .SLC_f18.SLC_fwb')?.textContent
     );
     const ofrTitle = getInputValue(card, 'input[name="ofrtitle"], input[id^="ofrtitle"], input[name^="ofrtitle"]');
@@ -1815,7 +1843,7 @@ import {
     state = state || cleanLocationFragment(getInputValue(card, 'input[id^="card_state"], input[name^="card_state"]'));
 
     if (!city || !state) {
-      const cityStateNodes = Array.from(card.querySelectorAll<HTMLElement>('.BuyLdC_time_loc .SLC_dflx.SLC_aic.SLC_gap5 strong.SLC_c2'));
+      const cityStateNodes = Array.from(card.querySelectorAll<HTMLElement>('.BuyLdC_time_loc .SLC_dflx.SLC_aic.SLC_gap5 strong.SLC_c2, .BLbp_hdrLeft strong.SLC_c2'));
       if (!city && cityStateNodes[0]) {
         city = cleanLocationFragment(cityStateNodes[0].textContent) || city;
       }
@@ -1857,6 +1885,7 @@ import {
       offerDate ||
       sanitizeOptional(card.querySelector('.BuyLdC_time_loc .MrLdsB_m1 strong')?.textContent) ||
       sanitizeOptional(card.querySelector('li[title="Date"] span, time, .date, .lstNwLftLoc strong')?.textContent) ||
+      sanitizeOptional(card.querySelector('.BLbp_hdrLeft strong.SLC_f14:not(.SLC_c2)')?.textContent) ||
       'N/A';
 
     const quantityText =
@@ -1910,7 +1939,7 @@ import {
     const orderValueInfo = parseRupeeRange(orderValueText || undefined);
 
     const enquiryTitle = primaryTitle || ofrTitle || requirement;
-    const leadId = buildLeadId(card, index, enquiryTitle || '', timestamp || '');
+    const leadId = buildLeadId(card, index, enquiryTitle || '', timestamp || '', city, state, categoryText || '');
 
     return {
       leadId,
@@ -1962,17 +1991,15 @@ import {
     let card: Element | undefined;
 
     if (lead) {
-      const enquiryTitleLower = (lead.enquiryTitle || '').toLowerCase();
-      const companyNameLower = (lead.companyName || '').toLowerCase();
       const leadIdStr = lead.leadId || '';
+      // Many cards share the same title, so a card only counts as a match when it
+      // produces exactly the same lead ID as the lead we evaluated.
+      const cardMatchesLead = (candidate: Element, candidateIndex: number): boolean =>
+        Boolean(leadIdStr) && extractLead(candidate, candidateIndex).leadId === leadIdStr;
 
       // First try the suggested cardIndex, but VERIFY it matches
       if (cards[cardIndex]) {
-        const candidateText = (cards[cardIndex].textContent || '').toLowerCase();
-        const indexMatches =
-          (enquiryTitleLower && candidateText.includes(enquiryTitleLower)) ||
-          (companyNameLower && companyNameLower !== 'n/a' && candidateText.includes(companyNameLower)) ||
-          (leadIdStr && candidateText.includes(leadIdStr));
+        const indexMatches = cardMatchesLead(cards[cardIndex], cardIndex);
 
         if (indexMatches) {
           card = cards[cardIndex];
@@ -1986,11 +2013,8 @@ import {
       if (!card) {
         for (let i = 0; i < cards.length; i++) {
           const testCard = cards[i];
-          const testText = (testCard.textContent || '').toLowerCase();
 
-          if ((enquiryTitleLower && testText.includes(enquiryTitleLower)) ||
-            (companyNameLower && companyNameLower !== 'n/a' && testText.includes(companyNameLower)) ||
-            (leadIdStr && testText.includes(leadIdStr))) {
+          if (cardMatchesLead(testCard, i)) {
             card = testCard;
             console.log('[Content] Found matching card at index', i, 'for lead', lead.leadId);
             break;
@@ -2552,8 +2576,23 @@ import {
   };
 
   const loadContactHistory = async (): Promise<void> => {
-    // Contact history is now only tracked in-memory
+    // Rebuild from CONTACTED entries in the passed leads log so the duplicate guard survives page refreshes.
     contactedLeadHistory = new Map();
+    if (typeof chrome === 'undefined' || !chrome.storage?.local) {
+      return;
+    }
+    try {
+      const result = await chrome.storage.local.get(STORAGE_KEYS.PASSED_LEADS_LOG);
+      const logs: PassedLeadLog[] = result[STORAGE_KEYS.PASSED_LEADS_LOG] || [];
+      logs.forEach((entry) => {
+        if (entry?.status === 'CONTACTED' && entry.lead?.leadId && typeof entry.timestamp === 'number') {
+          contactedLeadHistory.set(entry.lead.leadId, entry.timestamp);
+        }
+      });
+      purgeStaleContactHistory();
+    } catch (error) {
+      console.error('[Content] loadContactHistory - Error:', error);
+    }
   };
 
   const wasLeadContactedRecently = (leadId?: string): boolean => {
@@ -3191,6 +3230,11 @@ import {
       }).length;
 
       const noLeadsRemainToContact = remainingContactableLeads === 0;
+
+      // Keep the pre-refresh leads marked as processed in memory, so clearing the stored
+      // baseline does not let later cycles re-evaluate (and re-contact) them, and the next
+      // baseline capture still includes them.
+      refreshBaselineLeadIds.forEach((id) => processedLeads.add(id));
 
       if (refreshBaselineLeadIds.size > 0 && discoveredLeadOutsideRefreshBaseline) {
         await saveRefreshBaselineLeadIds(new Set<string>());
