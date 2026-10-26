@@ -1532,7 +1532,7 @@ import {
     return null;
   };
 
-  const ensureMinimumLeadCards = async (
+  const runEnsureMinimumLeadCards = async (
     maxAttempts = AUTO_SCROLL_MAX_ATTEMPTS,
     delayMs = AUTO_SCROLL_DELAY_MS
   ): Promise<void> => {
@@ -1688,6 +1688,22 @@ import {
     const finalCount = getLeadCardElements().length;
     const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
     console.log('[Content] ensureMinimumLeadCards complete. finalCount:', finalCount, 'elapsedSeconds:', elapsedTime);
+  };
+
+  // Callers must not read a half-loaded page: while an auto-scroll is still loading cards,
+  // later calls wait for that same run instead of returning early on the cooldown.
+  let activeAutoScroll: Promise<void> | null = null;
+
+  const ensureMinimumLeadCards = (maxAttempts?: number, delayMs?: number): Promise<void> => {
+    if (activeAutoScroll) {
+      console.log('[Content] ensureMinimumLeadCards - Waiting for in-progress auto-scroll');
+      return activeAutoScroll;
+    }
+    const run = runEnsureMinimumLeadCards(maxAttempts, delayMs).finally(() => {
+      if (activeAutoScroll === run) activeAutoScroll = null;
+    });
+    activeAutoScroll = run;
+    return run;
   };
 
   const normalizeLeadIdPart = (value?: string | null): string =>
@@ -3473,6 +3489,11 @@ import {
       if (!isAutoContactEnabled || isStopped) {
         console.log('[Content] startScrapeLoop - Auto-contact disabled or stopped, clearing timers');
         stopAutomationTimers();
+        return;
+      }
+
+      // A scroll is already loading cards; the call that started it scrapes when it finishes.
+      if (activeAutoScroll) {
         return;
       }
 
