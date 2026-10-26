@@ -2495,8 +2495,8 @@ import {
   // Validation and date utilities imported from utils/
 
   const determineDailyLimit = (_dayOfWeek: number): number => {
-    // Phase 2: Max 6 contacts per day
-    return 6;
+    // Phase 2: Max 5 contacts per day
+    return 5;
   };
 
   const initializeDailyStats = (): DailyContactStats => {
